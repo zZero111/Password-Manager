@@ -261,19 +261,19 @@ function ChangePassword({ vault }: { vault: Vault }) {
   );
 }
 
-const DELETE_CONFIRMATION = "DELETE";
-
 /** Account deletion: permanent, guarded by the Master password and a typed confirmation. */
 function DeleteAccount({ vault }: { vault: Vault }) {
   const [password, setPassword] = useState("");
   const [typed, setTyped] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const confirmed = typed.trim() === DELETE_CONFIRMATION;
+  // Typing the Account's own email is harder to do on autopilot than a fixed word.
+  const email = vault.lockedEmail;
+  const confirmed = !!email && typed.trim().toLowerCase() === email.toLowerCase();
 
   async function submit(e: FormEvent) {
     e.preventDefault();
-    if (!confirmed) return setError(`Type ${DELETE_CONFIRMATION} to confirm.`);
+    if (!confirmed) return setError("Type your Account's email to confirm.");
     setBusy(true);
     setError(null);
     try {
@@ -295,8 +295,8 @@ function DeleteAccount({ vault }: { vault: Vault }) {
         <Field label="Master password">
           <PasswordInput value={password} onChange={setPassword} autoComplete="current-password" />
         </Field>
-        <Field label={`Type ${DELETE_CONFIRMATION} to confirm`}>
-          <input value={typed} onChange={(e) => setTyped(e.target.value)} autoComplete="off" spellCheck={false} />
+        <Field label="Type your Account's email to confirm" hint={email}>
+          <input type="email" value={typed} onChange={(e) => setTyped(e.target.value)} autoComplete="off" spellCheck={false} />
         </Field>
         <ErrorText error={error} />
         <button className="btn danger" disabled={busy || !password || !confirmed}>
