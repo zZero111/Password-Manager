@@ -1,4 +1,4 @@
-import { type CustomField, type VaultItemData, newItemData } from "./vault";
+import { type CustomField, MAX_SECRET_HISTORY, type SecretHistoryEntry, type VaultItemData, newItemData } from "./vault";
 
 // Importer for Bitwarden's *unencrypted* JSON export
 // (Bitwarden: Tools → Export vault → File format: .json).
@@ -158,9 +158,15 @@ export function importBitwardenJson(json: string): ImportResult {
         code: s(bw.card?.code),
       };
     }
-    item.passwordHistory = (bw.passwordHistory ?? [])
+    item.secretHistory = (bw.passwordHistory ?? [])
       .filter((h) => h.password)
-      .map((h) => ({ password: s(h.password), changedAt: s(h.lastUsedDate) || item.modifiedAt }));
+      .map((h): SecretHistoryEntry => ({
+        field: { kind: "password" },
+        value: s(h.password),
+        changedAt: s(h.lastUsedDate) || item.modifiedAt,
+      }))
+      .sort((a, b) => b.changedAt.localeCompare(a.changedAt))
+      .slice(0, MAX_SECRET_HISTORY);
     items.push(item);
   }
   return { items, warnings };

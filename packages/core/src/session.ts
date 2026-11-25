@@ -13,7 +13,7 @@ import {
   unwrapVaultKey,
 } from "./crypto";
 import type { PushChange, ServerItem } from "./protocol";
-import { type VaultItem, type VaultItemData, applyEdit, isTrashed, newId, trashExpired } from "./vault";
+import { type VaultItem, type VaultItemData, applyEdit, isTrashed, newId, normalizeItem, trashExpired } from "./vault";
 
 /** Everything persisted on a device. Contains no plaintext secrets. */
 export interface LocalVault {
@@ -252,7 +252,8 @@ export class VaultSession {
     const cacheKey = `${id}|${ct}`;
     const cached = this.cache.get(cacheKey);
     if (cached) return cached;
-    const p = await decryptJson<Payload>(this.key(), ct, itemAad(id));
+    const raw = await decryptJson<Payload>(this.key(), ct, itemAad(id));
+    const p = "tombstone" in raw ? raw : normalizeItem(raw);
     this.cache.set(cacheKey, p);
     return p;
   }
