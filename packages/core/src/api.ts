@@ -1,13 +1,16 @@
-import type {
-  ChangePasswordRequest,
-  Device,
-  LoginRequest,
-  LoginResponse,
-  PreloginResponse,
-  PushChange,
-  PushResponse,
-  RegisterRequest,
-  SyncResponse,
+import {
+  type ApiErrorBody,
+  type ChangePasswordRequest,
+  type Device,
+  type LoginRequest,
+  type LoginResponse,
+  type PreloginResponse,
+  type PushChange,
+  type PushResponse,
+  type RegisterRequest,
+  type SyncResponse,
+  REJECTION_REASONS,
+  type RejectionReason,
 } from "./protocol";
 
 export class ApiError extends Error {
@@ -20,11 +23,21 @@ export class ApiError extends Error {
   }
 }
 
-export class SessionExpiredError extends ApiError {
-  constructor() {
-    super(401, "Your session has ended. Log in again to keep syncing.");
-    this.name = "SessionExpiredError";
+/**
+ * The Server no longer accepts this Device. `reason` is what the Server said
+ * (see RejectionReason); either way the Device is Disconnected for now: its
+ * vault and unsynced changes are kept until the person signs in again.
+ */
+export class DisconnectedError extends ApiError {
+  constructor(readonly reason: RejectionReason = "disconnected") {
+    super(401, "The Server no longer accepts this Device. Sign in again to keep syncing.");
+    this.name = "DisconnectedError";
   }
+}
+
+function rejectionReason(body: unknown): RejectionReason {
+  const reason = (body as ApiErrorBody | undefined)?.reason;
+  return reason && REJECTION_REASONS.includes(reason) ? reason : "disconnected";
 }
 
 export class NetworkError extends Error {
@@ -55,7 +68,7 @@ export class ApiClient {
     const headers: Record<string, string> = {};
     if (body !== undefined) headers["content-type"] = "application/json";
     if (auth) {
-      if (!this.token) throw new SessionExpiredError();
+      if (!this.token) throw new DisconnectedError();
       headers.authorization = `Bearer ${this.token}`;
     }
     let res: Response;
@@ -68,9 +81,14 @@ export class ApiClient {
     } catch (e) {
       throw new NetworkError(e);
     }
-    if (res.status === 401 && auth) throw new SessionExpiredError();
     const text = await res.text();
-    const json = text ? (JSON.parse(text) as unknown) : undefined;
+    let json: unknown;
+    try {
+      json = text ? (JSON.parse(text) as unknown) : undefined;
+    } catch (e) {
+      if (res.ok) throw e;
+    }
+    if (res.status === 401 && auth) throw new DisconnectedError(rejectionReason(json));
     if (!res.ok) {
       const msg = (json as { error?: string } | undefined)?.error ?? `Request failed (${res.status})`;
       throw new ApiError(res.status, msg);

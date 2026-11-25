@@ -217,7 +217,7 @@ function ChangePassword({ vault }: { vault: Vault }) {
         <Field label="Confirm new master password">
           <PasswordInput value={confirmPw} onChange={setConfirmPw} autoComplete="new-password" />
         </Field>
-        <p className="muted small">Your other devices will be signed out and need the new password to sign back in.</p>
+        <p className="muted small">Your other Devices will be Disconnected and need the new password to sign in again.</p>
         <ErrorText error={error} />
         {done && <p className="success">Master password changed.</p>}
         <button className="btn" disabled={busy || !current || !next}>

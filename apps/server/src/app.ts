@@ -3,6 +3,7 @@ import type { DatabaseSync } from "node:sqlite";
 import cors from "@fastify/cors";
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import {
+  type ApiErrorBody,
   type ChangePasswordRequest,
   type Device,
   KDF_MAX,
@@ -14,10 +15,11 @@ import {
   type PushRequest,
   type PushResponse,
   type RegisterRequest,
+  type RejectionReason,
   type ServerItem,
   type SyncResponse,
 } from "@pm/core/protocol";
-import { type ItemRow, type SessionRow, type UserRow, openDatabase, transaction } from "./db";
+import { type ItemRow, type RevocationRow, type SessionRow, type UserRow, openDatabase, transaction } from "./db";
 import { FailureLimiter, burnTime, fakeSalt, hashAuthKey, hashToken, newToken, verifyAuthKey } from "./security";
 
 export interface ServerOptions {
@@ -83,10 +85,14 @@ export async function buildServer(opts: ServerOptions): Promise<FastifyInstance>
     reply.header("referrer-policy", "no-referrer");
   });
 
-  app.setErrorHandler((err: Error & { statusCode?: number; validation?: unknown }, req, reply) => {
+  app.setErrorHandler((err: Error & { statusCode?: number; validation?: unknown; reason?: RejectionReason }, req, reply) => {
     const status = err.statusCode ?? 500;
     if (status >= 500) req.log.error(err);
-    reply.status(status).send({ error: err.validation ? `Invalid request: ${err.message}` : status >= 500 ? "Internal error" : err.message });
+    const error = err.validation ? `Invalid request: ${err.message}` : status >= 500 ? "Internal error" : err.message;
+    const payload: ApiErrorBody = { error };
+    // Every 401 says why the Server no longer accepts this Device.
+    if (status === 401) payload.reason = err.reason ?? "disconnected";
+    reply.status(status).send(payload);
   });
 
   const q = {
@@ -102,6 +108,15 @@ export async function buildServer(opts: ServerOptions): Promise<FastifyInstance>
     touchSession: db.prepare("UPDATE sessions SET last_seen_at = ? WHERE id = ?"),
     deleteSession: db.prepare("DELETE FROM sessions WHERE id = ? AND user_id = ?"),
     deleteOtherSessions: db.prepare("DELETE FROM sessions WHERE user_id = ? AND id != ?"),
+    revokeSession: db.prepare(
+      `INSERT OR REPLACE INTO revocations (token_hash, user_id, reason, created_at)
+       SELECT token_hash, user_id, ?, ? FROM sessions WHERE id = ? AND user_id = ?`,
+    ),
+    revokeOtherSessions: db.prepare(
+      `INSERT OR REPLACE INTO revocations (token_hash, user_id, reason, created_at)
+       SELECT token_hash, user_id, ?, ? FROM sessions WHERE user_id = ? AND id != ?`,
+    ),
+    revocationByToken: db.prepare("SELECT * FROM revocations WHERE token_hash = ?"),
     listSessions: db.prepare("SELECT * FROM sessions WHERE user_id = ? ORDER BY last_seen_at DESC"),
     itemsSince: db.prepare("SELECT id, data, deleted, revision FROM items WHERE user_id = ? AND revision > ? ORDER BY revision"),
     item: db.prepare("SELECT id, data, deleted, revision FROM items WHERE user_id = ? AND id = ?"),
@@ -117,12 +132,26 @@ export async function buildServer(opts: ServerOptions): Promise<FastifyInstance>
   const toItem = (r: ItemRow): ServerItem => ({ id: r.id, data: r.data, deleted: r.deleted === 1, revision: r.revision });
   const now = () => new Date().toISOString();
   const httpError = (statusCode: number, message: string) => Object.assign(new Error(message), { statusCode });
+  const rejected = (reason: RejectionReason) => Object.assign(httpError(401, "Not signed in"), { reason });
+
+  /** Stop accepting one Device, remembering why. */
+  function removeSession(sessionId: string, userId: string, reason: RejectionReason) {
+    return transaction(db, () => {
+      q.revokeSession.run(reason, now(), sessionId, userId);
+      return q.deleteSession.run(sessionId, userId);
+    });
+  }
 
   async function authenticate(req: FastifyRequest) {
     const header = req.headers.authorization ?? "";
     const token = header.startsWith("Bearer ") ? header.slice(7) : "";
-    const session = token ? (q.sessionByToken.get(hashToken(token)) as SessionRow | undefined) : undefined;
-    if (!session) throw httpError(401, "Not signed in");
+    const tokenHash = token ? hashToken(token) : "";
+    const session = token ? (q.sessionByToken.get(tokenHash) as SessionRow | undefined) : undefined;
+    if (!session) {
+      const revoked = token ? (q.revocationByToken.get(tokenHash) as RevocationRow | undefined) : undefined;
+      // A token the Server has never seen is treated as Disconnected: nothing is erased.
+      throw rejected(revoked?.reason === "signed_out" ? "signed_out" : "disconnected");
+    }
     // Only write last-seen once a minute to keep reads cheap.
     if (Date.now() - Date.parse(session.last_seen_at) > 60_000) q.touchSession.run(now(), session.id);
     req.auth = { userId: session.user_id, sessionId: session.id };
@@ -181,7 +210,7 @@ export async function buildServer(opts: ServerOptions): Promise<FastifyInstance>
   );
 
   app.post("/api/accounts/logout", { preHandler: authenticate }, async (req, reply) => {
-    q.deleteSession.run(req.auth.sessionId, req.auth.userId);
+    removeSession(req.auth.sessionId, req.auth.userId, "signed_out");
     reply.status(204);
   });
 
@@ -200,7 +229,8 @@ export async function buildServer(opts: ServerOptions): Promise<FastifyInstance>
       const authHash = await hashAuthKey(authKey);
       transaction(db, () => {
         q.updatePassword.run(salt, JSON.stringify(req.body.kdf), authHash, protectedKey, user.id);
-        // Every other device must sign in again with the new password.
+        // Every other Device is Disconnected until it signs in again with the new password.
+        q.revokeOtherSessions.run("disconnected", now(), user.id, req.auth.sessionId);
         q.deleteOtherSessions.run(user.id, req.auth.sessionId);
       });
       reply.status(204);
@@ -221,7 +251,7 @@ export async function buildServer(opts: ServerOptions): Promise<FastifyInstance>
   });
 
   app.delete<{ Params: { id: string } }>("/api/devices/:id", { preHandler: authenticate }, async (req, reply) => {
-    const res = q.deleteSession.run(req.params.id, req.auth.userId);
+    const res = removeSession(req.params.id, req.auth.userId, "signed_out");
     if (res.changes === 0) throw httpError(404, "Device not found");
     reply.status(204);
   });

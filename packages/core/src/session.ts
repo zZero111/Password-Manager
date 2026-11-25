@@ -1,4 +1,4 @@
-import { ApiClient, type FetchFn, SessionExpiredError, normalizeServerUrl } from "./api";
+import { ApiClient, type FetchFn, DisconnectedError, normalizeServerUrl } from "./api";
 import {
   DEFAULT_KDF,
   DecryptionError,
@@ -353,7 +353,7 @@ export class VaultSession {
       await this.persist();
       return result;
     } catch (e) {
-      if (e instanceof SessionExpiredError) {
+      if (e instanceof DisconnectedError) {
         this.state.token = null;
         this.api.token = null;
       }

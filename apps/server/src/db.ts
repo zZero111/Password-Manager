@@ -22,6 +22,13 @@ export interface SessionRow {
   last_seen_at: string;
 }
 
+export interface RevocationRow {
+  token_hash: string;
+  user_id: string;
+  reason: string;
+  created_at: string;
+}
+
 export interface ItemRow {
   id: string;
   data: string;
@@ -57,6 +64,15 @@ CREATE TABLE IF NOT EXISTS sessions (
   name         TEXT NOT NULL,
   created_at   TEXT NOT NULL,
   last_seen_at TEXT NOT NULL
+);
+
+-- Tokens the Server stopped accepting, and why, so a later request with one
+-- gets the right reason (see RejectionReason in @pm/core/protocol).
+CREATE TABLE IF NOT EXISTS revocations (
+  token_hash TEXT PRIMARY KEY,
+  user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  reason     TEXT NOT NULL CHECK (reason IN ('disconnected', 'signed_out')),
+  created_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS items (

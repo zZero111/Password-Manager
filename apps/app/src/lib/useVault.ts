@@ -1,7 +1,7 @@
 import {
   type AccountOptions,
+  DisconnectedError,
   NetworkError,
-  SessionExpiredError,
   type VaultItem,
   type VaultItemData,
   VaultSession,
@@ -13,7 +13,7 @@ import { idbStorage } from "./storage";
 export type Phase = "loading" | "signedOut" | "locked" | "unlocked";
 
 export interface SyncStatus {
-  state: "idle" | "syncing" | "offline" | "expired" | "error";
+  state: "idle" | "syncing" | "offline" | "disconnected" | "error";
   lastSyncAt: number | null;
   message?: string;
   pending: number;
@@ -56,7 +56,7 @@ export function useVault() {
     async (s = sessionRef.current) => {
       if (!s || s.locked) return;
       if (!s.signedIn) {
-        setSync((st) => ({ ...st, state: "expired", pending: s.pendingCount }));
+        setSync((st) => ({ ...st, state: "disconnected", pending: s.pendingCount }));
         return;
       }
       setSync((st) => ({ ...st, state: "syncing" }));
@@ -64,7 +64,7 @@ export function useVault() {
         await s.sync();
         setSync({ state: "idle", lastSyncAt: Date.now(), pending: s.pendingCount });
       } catch (e) {
-        const state = e instanceof SessionExpiredError ? "expired" : e instanceof NetworkError ? "offline" : "error";
+        const state = e instanceof DisconnectedError ? "disconnected" : e instanceof NetworkError ? "offline" : "error";
         setSync((st) => ({ ...st, state, message: (e as Error).message, pending: s.pendingCount }));
       }
       await refresh(s);
