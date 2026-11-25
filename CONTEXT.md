@@ -41,8 +41,12 @@ The Device still holds its vault and can be unlocked, but the Server no longer a
 _Avoid_: Signed out, expired, logged out
 
 **Sign out**:
-Removing a Device: its copy of the vault is erased and the Server stops accepting it. Done from another Device, it takes effect the next time the removed Device contacts the Server; until then it keeps its encrypted copy.
+Removing a Device: its copy of the vault is erased and the Server stops accepting it. Done from another Device, it takes effect the next time the removed Device contacts the Server — which it does even while Locked; until then it keeps its encrypted copy.
 _Avoid_: Log out, lock, disconnect, revoke
+
+**Offline erase**:
+A Device erasing its own copy of the vault after going a chosen number of days without reaching the Server. Off unless the person turns it on.
+_Avoid_: Self-destruct, wipe, dead-man switch
 
 ### The vault
 
@@ -109,5 +113,5 @@ Adding Items to the Vault from another password manager's export file (Bitwarden
 _Avoid_: Migration, restore
 
 **Export**:
-Writing every Item to an unencrypted file the person controls.
+Writing every Item outside the Trash to an unencrypted file the person controls.
 _Avoid_: Backup (a Server backup holds only encrypted data)
