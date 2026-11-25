@@ -145,6 +145,7 @@ export function SettingsPage({ vault, onBack }: { vault: Vault; onBack: () => vo
 
         <ChangePassword vault={vault} />
         <Devices vault={vault} />
+        <DeleteAccount vault={vault} />
 
         <Section title="Import">
           <p className="muted small">
@@ -254,6 +255,52 @@ function ChangePassword({ vault }: { vault: Vault }) {
         {done && <p className="success">Master password changed.</p>}
         <button className="btn" disabled={busy || !current || !next}>
           {busy ? "Changing…" : "Change master password"}
+        </button>
+      </form>
+    </Section>
+  );
+}
+
+/** Account deletion: permanent, guarded by the Master password and a typed confirmation. */
+function DeleteAccount({ vault }: { vault: Vault }) {
+  const [password, setPassword] = useState("");
+  const [typed, setTyped] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // Typing the Account's own email is harder to do on autopilot than a fixed word.
+  const email = vault.lockedEmail;
+  const confirmed = !!email && typed.trim().toLowerCase() === email.toLowerCase();
+
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    if (!confirmed) return setError("Type your Account's email to confirm.");
+    setBusy(true);
+    setError(null);
+    try {
+      // On success the vault shows the "Account deleted" notice; this page goes away.
+      await vault.deleteAccount(password);
+    } catch (err) {
+      setError((err as Error).message);
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Section title="Delete account">
+      <form onSubmit={submit} className="stack" aria-label="Delete account">
+        <p className="muted small">
+          Permanently deletes your Account and every Item it stores from the Server. This cannot be undone. Every one of
+          your Devices is signed out and erases its copy of the vault. Export first if you want to keep anything.
+        </p>
+        <Field label="Master password">
+          <PasswordInput value={password} onChange={setPassword} autoComplete="current-password" />
+        </Field>
+        <Field label="Type your Account's email to confirm" hint={email}>
+          <input type="email" value={typed} onChange={(e) => setTyped(e.target.value)} autoComplete="off" spellCheck={false} />
+        </Field>
+        <ErrorText error={error} />
+        <button className="btn danger" disabled={busy || !password || !confirmed}>
+          {busy ? "Deleting…" : "Delete account permanently"}
         </button>
       </form>
     </Section>

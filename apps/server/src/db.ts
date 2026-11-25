@@ -70,7 +70,9 @@ CREATE TABLE IF NOT EXISTS sessions (
 -- gets the right reason (see RejectionReason in @pm/core/protocol).
 CREATE TABLE IF NOT EXISTS revocations (
   token_hash TEXT PRIMARY KEY,
-  user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  -- No foreign key: revocations must outlive Account deletion so the Account's
+  -- other Devices still learn they were signed out (and erase themselves).
+  user_id    TEXT NOT NULL,
   reason     TEXT NOT NULL CHECK (reason IN ('disconnected', 'signed_out')),
   created_at TEXT NOT NULL
 );

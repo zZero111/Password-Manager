@@ -318,6 +318,17 @@ export class VaultSession {
     await this.persist();
   }
 
+  /**
+   * Account deletion: proves the Master password to the Server, which removes
+   * the Account, its Items and every Device; then this Device erases itself.
+   * A wrong Master password rejects (Server 400) and changes nothing.
+   */
+  async deleteAccount(masterPassword: string): Promise<void> {
+    const { authKey } = await deriveMasterKeys(masterPassword, this.state.salt, this.state.kdf);
+    await this.reach(() => this.api.deleteAccount({ authKey }));
+    await this.erase();
+  }
+
   /** Sign out on the server and erase this device's copy of the vault. */
   async logout(): Promise<void> {
     try {

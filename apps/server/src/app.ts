@@ -5,6 +5,7 @@ import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import {
   type ApiErrorBody,
   type ChangePasswordRequest,
+  type DeleteAccountRequest,
   type Device,
   KDF_MAX,
   KDF_MIN,
@@ -116,6 +117,11 @@ export async function buildServer(opts: ServerOptions): Promise<FastifyInstance>
       `INSERT OR REPLACE INTO revocations (token_hash, user_id, reason, created_at)
        SELECT token_hash, user_id, ?, ? FROM sessions WHERE user_id = ? AND id != ?`,
     ),
+    revokeAllSessions: db.prepare(
+      `INSERT OR REPLACE INTO revocations (token_hash, user_id, reason, created_at)
+       SELECT token_hash, user_id, ?, ? FROM sessions WHERE user_id = ?`,
+    ),
+    deleteUser: db.prepare("DELETE FROM users WHERE id = ?"),
     revocationByToken: db.prepare("SELECT * FROM revocations WHERE token_hash = ?"),
     listSessions: db.prepare("SELECT * FROM sessions WHERE user_id = ? ORDER BY last_seen_at DESC"),
     itemsSince: db.prepare("SELECT id, data, deleted, revision FROM items WHERE user_id = ? AND revision > ? ORDER BY revision"),
@@ -237,6 +243,24 @@ export async function buildServer(opts: ServerOptions): Promise<FastifyInstance>
         // Every other Device is Disconnected until it signs in again with the new password.
         q.revokeOtherSessions.run("disconnected", now(), user.id, req.auth.sessionId);
         q.deleteOtherSessions.run(user.id, req.auth.sessionId);
+      });
+      reply.status(204);
+    },
+  );
+
+  // Account deletion: every Device is recorded as signed_out first (revocations
+  // outlive the user row), then the user goes, cascading to sessions and items.
+  app.post<{ Body: DeleteAccountRequest }>(
+    "/api/accounts/delete",
+    { preHandler: authenticate, schema: body({ authKey: b64(64) }) },
+    async (req, reply) => {
+      const user = q.userById.get(req.auth.userId) as unknown as UserRow;
+      if (!(await verifyAuthKey(req.body.authKey, user.auth_hash))) {
+        throw httpError(400, "Master password is incorrect");
+      }
+      transaction(db, () => {
+        q.revokeAllSessions.run("signed_out", now(), user.id);
+        q.deleteUser.run(user.id);
       });
       reply.status(204);
     },

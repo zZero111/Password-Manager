@@ -206,7 +206,12 @@ export function Unlock({ vault }: { vault: Vault }) {
 /** Full-screen notice after a Sign out from another Device erased this Device's vault. */
 export function ErasedNotice({ vault, reason }: { vault: Vault; reason: ErasedReason }) {
   const text =
-    reason === "offlineErase"
+    reason === "accountDeleted"
+      ? {
+          title: "Your Account was deleted",
+          body: "The Account and everything it stored were permanently removed from the Server, and this Device’s copy of the vault was erased. Your other Devices erase theirs the next time they reach the Server.",
+        }
+      : reason === "offlineErase"
       ? {
           title: "This Device’s vault was erased by Offline erase",
           body: "It went longer than the chosen number of days without reaching the Server, so its copy of the vault and any unsynced changes were removed. Sign in again to use your vault here.",

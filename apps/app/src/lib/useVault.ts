@@ -27,7 +27,7 @@ const SYNC_INTERVAL_MS = 60_000;
 const CHECK_INTERVAL_MS = 3 * 60_000;
 
 /** Why this Device's vault was erased: Signed out from another Device, or Offline erase. */
-export type ErasedReason = "signedOut" | "offlineErase";
+export type ErasedReason = "signedOut" | "offlineErase" | "accountDeleted";
 
 export function useVault() {
   const [phase, setPhase] = useState<Phase>("loading");
@@ -281,6 +281,11 @@ export function useVault() {
     },
     async changePassword(current: string, next: string) {
       await guard((s) => s.changePassword(current, next));
+    },
+    /** Account deletion: the Server removes the Account; this Device erases and shows the notice. */
+    async deleteAccount(masterPassword: string) {
+      await guard((s) => s.deleteAccount(masterPassword));
+      onErased("accountDeleted");
     },
     devices: () => guard((s) => s.devices()),
     revokeDevice: (id: string) => guard((s) => s.revokeDevice(id)),
