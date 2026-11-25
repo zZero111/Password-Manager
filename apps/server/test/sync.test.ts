@@ -123,7 +123,13 @@ describe("sync", () => {
     await a.sync();
     const edited = await a.get(gh.id);
     expect(edited?.login?.password).toBe("s3cret");
-    expect(edited?.passwordHistory[0]?.password).toBe("hunter2");
+    expect(edited?.secretHistory[0]).toMatchObject({ field: { kind: "password" }, value: "hunter2" });
+
+    // Secret history recorded on A reaches Device B.
+    await a.save({ ...edited!, login: { ...edited!.login!, password: "third" } }, gh.id);
+    await a.sync();
+    await b.sync();
+    expect((await b.get(gh.id))?.secretHistory.map((h) => h.value)).toEqual(["s3cret", "hunter2"]);
   });
 
   it("Delete on A → in B's Trash → Restore → back on both", async () => {

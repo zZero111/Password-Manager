@@ -27,7 +27,25 @@ export interface CardData {
   code: string;
 }
 
-export interface PasswordHistoryEntry {
+/** Which secret field a Secret history entry came from. */
+export type SecretField =
+  | { kind: "password" }
+  | { kind: "totp" }
+  | { kind: "cardNumber" }
+  | { kind: "cardCode" }
+  | { kind: "hidden"; name: string };
+
+/** A previous value of one of an Item's secret fields. */
+export interface SecretHistoryEntry {
+  field: SecretField;
+  value: string;
+  changedAt: string;
+  /** True when the value lost a Conflict rather than being edited away. */
+  fromConflict?: boolean;
+}
+
+/** v1 payload shape (Login password only); read via normalizeItem. */
+interface LegacyPasswordHistoryEntry {
   password: string;
   changedAt: string;
 }
@@ -41,7 +59,8 @@ export interface VaultItemData {
   fields: CustomField[];
   login?: LoginData;
   card?: CardData;
-  passwordHistory: PasswordHistoryEntry[];
+  /** Newest first, at most MAX_SECRET_HISTORY entries. */
+  secretHistory: SecretHistoryEntry[];
   createdAt: string;
   modifiedAt: string;
   /** Set while the Item is in the Trash (encrypted with the rest; the Server never sees it). */
@@ -73,26 +92,91 @@ export function newItemData(type: ItemType, now = new Date()): VaultItemData {
     fields: [],
     login: type === "login" ? emptyLogin() : undefined,
     card: type === "card" ? emptyCard() : undefined,
-    passwordHistory: [],
+    secretHistory: [],
     createdAt: ts,
     modifiedAt: ts,
   };
 }
 
-const MAX_HISTORY = 10;
+export const MAX_SECRET_HISTORY = 20;
+
+/** Human label for a secret field, e.g. "Password" or "Hidden field “PIN”". */
+export function secretFieldLabel(field: SecretField): string {
+  switch (field.kind) {
+    case "password":
+      return "Password";
+    case "totp":
+      return "Authenticator key";
+    case "cardNumber":
+      return "Card number";
+    case "cardCode":
+      return "Security code";
+    case "hidden":
+      return `Hidden field “${field.name}”`;
+  }
+}
 
 /**
- * Apply an edit: bump modifiedAt and record the previous password in history
- * when it changes.
+ * An Item's current secret values, each with a stable key for comparing two
+ * versions of the same Item (repeated hidden-field names are told apart by order).
+ */
+export function secretValues(item: VaultItemData): { key: string; field: SecretField; value: string }[] {
+  const out: { key: string; field: SecretField; value: string }[] = [];
+  if (item.login) {
+    out.push({ key: "password", field: { kind: "password" }, value: item.login.password });
+    out.push({ key: "totp", field: { kind: "totp" }, value: item.login.totp });
+  }
+  if (item.card) {
+    out.push({ key: "cardNumber", field: { kind: "cardNumber" }, value: item.card.number });
+    out.push({ key: "cardCode", field: { kind: "cardCode" }, value: item.card.code });
+  }
+  const seen = new Map<string, number>();
+  for (const f of item.fields) {
+    if (!f.hidden) continue;
+    const n = seen.get(f.name) ?? 0;
+    seen.set(f.name, n + 1);
+    out.push({ key: `hidden:${n}:${f.name}`, field: { kind: "hidden", name: f.name }, value: f.value });
+  }
+  return out;
+}
+
+/** Previous secret values that `next` no longer holds, as Secret history entries. */
+export function lostSecrets(previous: VaultItemData, next: VaultItemData, changedAt: string): SecretHistoryEntry[] {
+  const now = new Map(secretValues(next).map((s) => [s.key, s.value]));
+  return secretValues(previous)
+    .filter((s) => s.value && now.get(s.key) !== s.value)
+    .map((s) => ({ field: s.field, value: s.value, changedAt }));
+}
+
+/** Prepend entries to a Secret history, keeping the newest MAX_SECRET_HISTORY. */
+export function pushSecretHistory(history: SecretHistoryEntry[], entries: SecretHistoryEntry[]): SecretHistoryEntry[] {
+  return entries.length ? [...entries, ...history].slice(0, MAX_SECRET_HISTORY) : history;
+}
+
+/**
+ * Apply an edit: bump modifiedAt and record every changed secret value in
+ * Secret history.
  */
 export function applyEdit(previous: VaultItemData | undefined, next: VaultItemData, now = new Date()): VaultItemData {
   const ts = now.toISOString();
-  let history = next.passwordHistory;
-  const oldPw = previous?.login?.password;
-  if (oldPw && next.login && oldPw !== next.login.password) {
-    history = [{ password: oldPw, changedAt: ts }, ...history].slice(0, MAX_HISTORY);
-  }
-  return { ...next, passwordHistory: history, modifiedAt: ts, createdAt: previous?.createdAt ?? next.createdAt };
+  const history = previous ? pushSecretHistory(next.secretHistory, lostSecrets(previous, next, ts)) : next.secretHistory;
+  return { ...next, secretHistory: history, modifiedAt: ts, createdAt: previous?.createdAt ?? next.createdAt };
+}
+
+/**
+ * Read an Item payload of any version as current VaultItemData: a v1
+ * `passwordHistory` becomes Secret history entries for the password. Stored
+ * data is not rewritten; the new shape is saved on the Item's next edit.
+ */
+export function normalizeItem<T extends VaultItemData>(raw: T): T {
+  const { passwordHistory, ...rest } = raw as T & { passwordHistory?: LegacyPasswordHistoryEntry[] };
+  if (Array.isArray(rest.secretHistory) && passwordHistory === undefined) return raw;
+  const secretHistory = Array.isArray(rest.secretHistory)
+    ? rest.secretHistory
+    : (passwordHistory ?? []).map(
+        (h): SecretHistoryEntry => ({ field: { kind: "password" }, value: h.password, changedAt: h.changedAt }),
+      );
+  return { ...rest, secretHistory } as T;
 }
 
 export function newId(): string {

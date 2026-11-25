@@ -5,6 +5,7 @@ import {
   emptyCard,
   emptyLogin,
   parseTotp,
+  secretFieldLabel,
   trashDaysLeft,
 } from "@pm/core";
 import { type FormEvent, useState } from "react";
@@ -138,9 +139,9 @@ export function ItemView({
           {trash && <span>In the Trash · {daysLeftLabel(item)}</span>}
           <span>Updated {fmt(item.modifiedAt)}</span>
           <span>Created {fmt(item.createdAt)}</span>
-          {item.passwordHistory.length > 0 && (
+          {item.secretHistory.length > 0 && (
             <button type="button" className="btn link small" onClick={() => setShowHistory(true)}>
-              Password history ({item.passwordHistory.length})
+              Secret history ({item.secretHistory.length})
             </button>
           )}
         </div>
@@ -163,9 +164,14 @@ export function ItemView({
       </div>
 
       {showHistory && (
-        <Modal title="Password history" onClose={() => setShowHistory(false)}>
-          {item.passwordHistory.map((h, i) => (
-            <ValueRow key={i} label={`Replaced ${fmt(h.changedAt)}`} value={h.password} secret />
+        <Modal title="Secret history" onClose={() => setShowHistory(false)}>
+          {item.secretHistory.map((h, i) => (
+            <ValueRow
+              key={i}
+              label={`${secretFieldLabel(h.field)} · replaced ${fmt(h.changedAt)}${h.fromConflict ? " (lost a Conflict)" : ""}`}
+              value={h.value}
+              secret
+            />
           ))}
         </Modal>
       )}
