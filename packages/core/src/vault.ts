@@ -221,8 +221,35 @@ export function sortItems<T extends VaultItemData>(items: T[]): T[] {
   );
 }
 
+/** A Folder's identity: names match ignoring case and surrounding spaces. "" means no Folder. */
+export function folderKey(name: string): string {
+  return name.trim().toLowerCase();
+}
+
+/** Whether a Folder name refers to the given Folder. */
+export function inFolder(folder: string, name: string): boolean {
+  const key = folderKey(name);
+  return key !== "" && folderKey(folder) === key;
+}
+
+/**
+ * One display name per Folder, spelled as on the most recently changed Item
+ * that uses it, sorted by name.
+ */
 export function folders(items: VaultItemData[]): string[] {
-  return [...new Set(items.map((i) => i.folder).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  const latest = new Map<string, { name: string; at: string }>();
+  for (const i of items) {
+    const key = folderKey(i.folder);
+    if (!key) continue;
+    const seen = latest.get(key);
+    if (!seen || i.modifiedAt > seen.at) latest.set(key, { name: i.folder.trim(), at: i.modifiedAt });
+  }
+  return [...latest.values()].map((f) => f.name).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+}
+
+/** The existing Folder a typed name refers to, or the typed name (trimmed) when it's new. */
+export function resolveFolder(existing: string[], name: string): string {
+  return existing.find((f) => inFolder(f, name)) ?? name.trim();
 }
 
 /** Days an Item stays in the Trash before any unlocked Device Purges it. */

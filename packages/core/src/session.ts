@@ -13,7 +13,7 @@ import {
   unwrapVaultKey,
 } from "./crypto";
 import type { PushChange, ServerItem } from "./protocol";
-import { type VaultItem, type VaultItemData, applyEdit, isTrashed, newId, normalizeItem, settleConflict, trashExpired } from "./vault";
+import { type VaultItem, type VaultItemData, applyEdit, folderKey, folders, inFolder, isTrashed, newId, normalizeItem, resolveFolder, settleConflict, trashExpired } from "./vault";
 
 /** Everything persisted on a device. Contains no plaintext secrets. */
 export interface LocalVault {
@@ -495,6 +495,32 @@ export class VaultSession {
     if (!item || !isTrashed(item)) return;
     const { trashedAt: _t, ...rest } = item;
     await this.save(rest, id);
+  }
+
+  /**
+   * Rename folder: rewrite the Folder on every matching Item, Trash included,
+   * as ordinary edits. When `to` matches an existing Folder they merge.
+   * Returns how many Items changed.
+   */
+  async renameFolder(from: string, to: string): Promise<number> {
+    if (!folderKey(from) || !folderKey(to)) return 0;
+    const { items, trash } = await this.list();
+    // Onto another existing Folder: merge, keeping that Folder's spelling.
+    const others = folders([...items, ...trash]).filter((f) => !inFolder(f, from));
+    const name = resolveFolder(others, to);
+    const now = this.now();
+    const key = this.key();
+    let changed = 0;
+    for (const item of [...items, ...trash]) {
+      if (!inFolder(item.folder, from) || item.folder === name) continue;
+      const { id, ...previous } = item;
+      const final = applyEdit(previous, { ...previous, folder: name }, now);
+      const ct = await encryptJson(key, final, itemAad(id));
+      this.state.pending[id] = { id, data: ct, deleted: false, baseRevision: this.baseRevision(id) };
+      changed++;
+    }
+    if (changed) await this.persist();
+    return changed;
   }
 
   /** Purge every Item in the Trash. Returns how many were Purged. */

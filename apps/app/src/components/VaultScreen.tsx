@@ -1,4 +1,4 @@
-import { type ItemType, type VaultItem, folders as folderList, matchesSearch, newItemData, sortItems } from "@pm/core";
+import { type ItemType, type VaultItem, folders as folderList, inFolder, matchesSearch, newItemData, sortItems } from "@pm/core";
 import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import type { Vault } from "../lib/useVault";
 import { Generator } from "./Generator";
@@ -15,7 +15,8 @@ type Filter =
 type Page = "items" | "generator" | "settings";
 type Editing = null | { kind: "new"; type: ItemType } | { kind: "edit"; id: string };
 
-const same = (a: Filter, b: Filter) => JSON.stringify(a) === JSON.stringify(b);
+const same = (a: Filter, b: Filter) =>
+  a.kind === "folder" && b.kind === "folder" ? inFolder(a.folder, b.folder) : JSON.stringify(a) === JSON.stringify(b);
 
 function subtitle(item: VaultItem) {
   if (item.login) return item.login.username || item.login.uris[0] || "";
@@ -46,7 +47,7 @@ export function VaultScreen({ vault }: { vault: Vault }) {
         case "type":
           return i.type === filter.type;
         case "folder":
-          return i.folder === filter.folder;
+          return inFolder(i.folder, filter.folder);
         default:
           return true;
       }
@@ -263,6 +264,26 @@ export function VaultScreen({ vault }: { vault: Vault }) {
           </div>
         )}
 
+        {filter.kind === "folder" && (
+          <div className="folder-bar muted small">
+            <span>
+              <Icon name="folder" size={14} /> {allFolders.find((f) => inFolder(f, filter.folder)) ?? filter.folder}
+            </span>
+            <button
+              type="button"
+              className="btn small"
+              onClick={async () => {
+                const current = allFolders.find((f) => inFolder(f, filter.folder)) ?? filter.folder;
+                const to = prompt(`Rename folder “${current}” to:`, current)?.trim();
+                if (!to || to === current) return;
+                await vault.renameFolder(current, to);
+                setFilter({ kind: "folder", folder: to });
+              }}
+            >
+              Rename folder
+            </button>
+          </div>
+        )}
         {inTrash && vault.trash.length > 0 && (
           <div className="trash-bar muted small">
             <span>Items in the Trash are deleted permanently after 30 days.</span>
