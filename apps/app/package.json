@@ -7,9 +7,10 @@
     "dev": "vite",
     "build": "tsc -p . && vite build",
     "preview": "vite preview",
-    "typecheck": "tsc -p .",
+    "typecheck": "tsc -p . && tsc -p tsconfig.e2e.json",
     "test": "echo 'no app unit tests (logic lives in @pm/core)'",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "smoke": "pnpm --filter @pm/server build && pnpm build && playwright test --trace off"
   },
   "dependencies": {
     "@pm/core": "workspace:*",
@@ -21,7 +22,9 @@
     "react-dom": "^19.3.1"
   },
   "devDependencies": {
+    "@playwright/test": "1.63.0",
     "@tauri-apps/cli": "^2.12.6",
+    "@types/node": "^22.20.6",
     "@types/react": "^19.3.2",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.3.0",
