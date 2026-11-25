@@ -554,7 +554,8 @@ textarea {
   background: var(--danger-soft);
   color: var(--danger);
 }
-.trash-bar {
+.trash-bar,
+.folder-bar {
   display: flex;
   align-items: center;
   justify-content: space-between;

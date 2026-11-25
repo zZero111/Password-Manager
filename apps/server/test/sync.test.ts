@@ -14,6 +14,7 @@ import {
   NetworkError,
   VaultSession,
   WrongPasswordError,
+  folders,
   newItemData,
 } from "@pm/core";
 import { buildServer } from "../src/app";
@@ -358,6 +359,48 @@ describe("sync", () => {
     expect(r.pushed).toBe(120);
     const b = await login();
     expect((await b.list()).items).toHaveLength(120);
+  });
+});
+
+describe("folders", () => {
+  it("rename syncs to Device B", async () => {
+    const { session: a } = await registerAlice();
+    const b = await login();
+    await a.save({ ...login_("GitHub"), folder: "Work" });
+    await a.save({ ...login_("Jira"), folder: " work " });
+    const old = await a.save({ ...login_("Old VPN"), folder: "WORK" });
+    await a.save({ ...login_("Bank"), folder: "Personal" });
+    await a.delete(old.id);
+    await a.sync();
+    await b.sync();
+
+    expect(await a.renameFolder("work", "Job")).toBe(3);
+    await a.sync();
+    await b.sync();
+    for (const s of [a, b]) {
+      const { items, trash } = await s.list();
+      const byName = Object.fromEntries([...items, ...trash].map((i) => [i.name, i.folder]));
+      expect(byName).toEqual({ GitHub: "Job", Jira: "Job", "Old VPN": "Job", Bank: "Personal" });
+      expect(trash.map((i) => i.name)).toEqual(["Old VPN"]);
+      expect(folders(items)).toEqual(["Job", "Personal"]);
+    }
+  });
+
+  it("rename onto an existing Folder merges", async () => {
+    const { session: a } = await registerAlice();
+    const b = await login();
+    await a.save({ ...login_("GitHub"), folder: "Work" });
+    await a.save({ ...login_("Bank"), folder: "Personal" });
+    await a.sync();
+
+    expect(await a.renameFolder("Work", " personal")).toBe(1);
+    await a.sync();
+    await b.sync();
+    for (const s of [a, b]) {
+      const { items } = await s.list();
+      expect(folders(items)).toEqual(["Personal"]);
+      expect(items.map((i) => i.folder)).toEqual(["Personal", "Personal"]);
+    }
   });
 });
 

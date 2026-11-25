@@ -4,7 +4,9 @@ import {
   type VaultItemData,
   emptyCard,
   emptyLogin,
+  inFolder,
   parseTotp,
+  resolveFolder,
   secretFieldLabel,
   trashDaysLeft,
 } from "@pm/core";
@@ -219,7 +221,11 @@ export function ItemEditor({
       const cleaned: VaultItemData = {
         ...d,
         name: d.name.trim(),
-        folder: d.folder.trim(),
+        // Typing "work" joins the existing Folder "Work" (unless re-spelling this Item's own Folder).
+        folder: resolveFolder(
+          folders.filter((f) => !inFolder(f, initial.folder)),
+          d.folder,
+        ),
         fields: d.fields.filter((f) => f.name || f.value),
         login: d.login && { ...d.login, uris: d.login.uris.map((u) => u.trim()).filter(Boolean) },
       };

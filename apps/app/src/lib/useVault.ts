@@ -264,6 +264,8 @@ export function useVault() {
     restore: (id: string) => change((s) => s.restore(id)),
     purge: (id: string) => change((s) => s.purge(id)),
     emptyTrash: () => change((s) => s.emptyTrash()),
+    /** Rename folder: rewrites every matching Item (Trash included) and syncs right away. */
+    renameFolder: (from: string, to: string) => change((s) => s.renameFolder(from, to)),
     async importItems(data: VaultItemData[]) {
       const s = sessionRef.current!;
       const n = await s.addMany(data);
