@@ -109,6 +109,8 @@ export function useVault() {
     async (s = sessionRef.current) => {
       if (!s || s.locked) return;
       if (!s.signedIn) {
+        // Disconnected hasn't reached the Server: Offline erase still counts down.
+        if (await s.offlineEraseIfDue()) return onErased("offlineErase");
         setSync((st) => ({ ...st, state: "disconnected", pending: s.pendingCount }));
         return;
       }
@@ -118,6 +120,8 @@ export function useVault() {
         setSync({ state: "idle", lastSyncAt: Date.now(), pending: s.pendingCount });
       } catch (e) {
         if (e instanceof DeviceErasedError) return onErased();
+        // Couldn't reach the Server (or no longer accepted): Offline erase applies while unlocked too.
+        if (await s.offlineEraseIfDue()) return onErased("offlineErase");
         const state = e instanceof DisconnectedError ? "disconnected" : e instanceof NetworkError ? "offline" : "error";
         setSync((st) => ({ ...st, state, message: (e as Error).message, pending: s.pendingCount }));
       }

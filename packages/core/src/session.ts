@@ -229,8 +229,9 @@ export class VaultSession {
   /**
    * Ask the Server whether this Device is still accepted. Needs no Master
    * password, so it runs while Locked. A `signed_out` answer erases; so does
-   * Offline erase, but only when the Server can't be reached and its limit
-   * has passed — a reachable Server always just resets the countdown.
+   * Offline erase once its limit has passed and the Server can't be reached
+   * or no longer accepts this Device (Disconnected doesn't count as reaching
+   * it) — an accepting Server always just resets the countdown.
    */
   static async checkDevice(
     storage: VaultStorage,
@@ -240,7 +241,7 @@ export class VaultSession {
     const now = opts.now ?? realClock;
     const state = await storage.load();
     if (!state) return "noVault";
-    if (!state.token) return "disconnected";
+    if (!state.token) return (await VaultSession.offlineErase(storage, state, now)) ?? "disconnected";
     try {
       await new ApiClient(state.serverUrl, state.token, fetchFn).status();
     } catch (e) {
@@ -251,6 +252,7 @@ export class VaultSession {
         }
         // Re-read so a write made meanwhile (e.g. an edit) is not lost.
         const latest = (await storage.load()) ?? state;
+        if ((await VaultSession.offlineErase(storage, latest, now)) !== null) return "offlineErased";
         if (latest.token === state.token) await storage.save({ ...latest, token: null });
         return "disconnected";
       }
@@ -415,6 +417,20 @@ export class VaultSession {
       }
       throw e;
     }
+  }
+
+  /**
+   * Offline erase for an unlocked session: call after the Server couldn't be
+   * reached or no longer accepts this Device. Past the limit, erases this
+   * Device's vault and locks; returns whether it did. Accepted contact keeps
+   * `lastReachedServer` current, so a reachable Device is never past it.
+   */
+  async offlineEraseIfDue(): Promise<boolean> {
+    if (this.erasedFlag) return true;
+    const at = offlineEraseAt(this.state);
+    if (!at || this.now().getTime() <= at.getTime()) return false;
+    await this.erase();
+    return true;
   }
 
   private async erase(): Promise<void> {
