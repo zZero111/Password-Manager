@@ -88,6 +88,18 @@ export interface ChangePasswordRequest {
   protectedKey: string;
 }
 
+/**
+ * Why the Server no longer accepts a Device (sent with every 401).
+ * - "disconnected": e.g. the Master password changed, or the token is unknown.
+ *   The Device keeps its vault and can sign in again.
+ * - "signed_out": the Device signed out, or was removed from another Device.
+ */
+export type RejectionReason = "disconnected" | "signed_out";
+
+export const REJECTION_REASONS: readonly RejectionReason[] = ["disconnected", "signed_out"];
+
 export interface ApiErrorBody {
   error: string;
+  /** Present on every 401. Older Servers omit it; treat absence as "disconnected". */
+  reason?: RejectionReason;
 }

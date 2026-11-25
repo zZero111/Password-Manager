@@ -461,7 +461,7 @@ textarea {
   animation: spin 1s linear infinite;
 }
 .sync-pill.s-offline,
-.sync-pill.s-expired {
+.sync-pill.s-disconnected {
   color: var(--warn);
 }
 .sync-pill.s-error {

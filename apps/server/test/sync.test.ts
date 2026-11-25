@@ -6,10 +6,10 @@ import type { FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   ApiError,
+  DisconnectedError,
   type KdfParams,
   MIN_KDF,
   MemoryStorage,
-  SessionExpiredError,
   VaultSession,
   WrongPasswordError,
   newItemData,
@@ -215,7 +215,7 @@ describe("zero-knowledge storage", () => {
 });
 
 describe("master password change", () => {
-  it("signs out other devices, which re-authenticate with the new password and keep offline edits", async () => {
+  it("Master password change → Device B Disconnected, pending kept, uploaded after signing in again", async () => {
     const { session: a } = await registerAlice();
     const bStorage = new MemoryStorage();
     const b = await login(bStorage);
@@ -224,15 +224,20 @@ describe("master password change", () => {
     await b.sync();
 
     await a.changePassword(PASSWORD, "a brand new master password");
-    await b.save({ ...item, notes: "edited on B while signed out" }, item.id);
-    await expect(b.sync()).rejects.toBeInstanceOf(SessionExpiredError);
+    await b.save({ ...item, notes: "edited on B while Disconnected" }, item.id);
+    const err = await b.sync().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DisconnectedError);
+    expect((err as DisconnectedError).reason).toBe("disconnected");
     expect(b.signedIn).toBe(false);
+    expect(b.pendingCount).toBe(1);
+    expect((await b.get(item.id))?.notes).toBe("edited on B while Disconnected");
 
     await expect(b.reauthenticate(PASSWORD)).rejects.toBeInstanceOf(ApiError);
     await b.reauthenticate("a brand new master password");
     await b.sync();
     await a.sync();
-    expect((await a.get(item.id))?.notes).toBe("edited on B while signed out");
+    expect(b.pendingCount).toBe(0);
+    expect((await a.get(item.id))?.notes).toBe("edited on B while Disconnected");
 
     // The new password now unlocks B's local copy; the old one doesn't.
     await expect(VaultSession.unlock(bStorage, PASSWORD)).rejects.toBeInstanceOf(WrongPasswordError);
@@ -253,13 +258,66 @@ describe("devices", () => {
     expect(devices.map((d) => d.name).sort()).toEqual(["Device A", "Device B"]);
     expect(devices.find((d) => d.current)?.name).toBe("Device A");
     await a.revokeDevice(devices.find((d) => !d.current)!.id);
-    await expect(b.sync()).rejects.toBeInstanceOf(SessionExpiredError);
+    const err = await b.sync().catch((e: unknown) => e);
+    // Removed from another Device: reported as signed_out, but for now B is only Disconnected.
+    expect(err).toBeInstanceOf(DisconnectedError);
+    expect((err as DisconnectedError).reason).toBe("signed_out");
+    expect(b.signedIn).toBe(false);
     await b.logout();
   });
 
   it("rejects requests without a valid token", async () => {
     const res = await fetch(`${url}/api/sync?since=0`, { headers: { authorization: "Bearer nope" } });
     expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ error: "Not signed in", reason: "disconnected" });
+    const none = await fetch(`${url}/api/sync?since=0`);
+    expect(none.status).toBe(401);
+    expect((await none.json()).reason).toBe("disconnected");
+  });
+
+  it("unknown token reports Disconnected", async () => {
+    await registerAlice();
+    const b = await login();
+    const item = await b.save(login_("Kept"));
+    // The Server forgets B's token without recording why (e.g. restored from an older backup).
+    const db = new DatabaseSync(dbPath);
+    db.prepare("DELETE FROM sessions WHERE name = 'Device B'").run();
+    db.close();
+    const err = await b.sync().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DisconnectedError);
+    expect((err as DisconnectedError).reason).toBe("disconnected");
+    expect(b.pendingCount).toBe(1);
+    expect((await b.get(item.id))?.name).toBe("Kept");
+  });
+
+  it("a logged-out or removed token gets reason signed_out on the wire", async () => {
+    const { session: a } = await registerAlice();
+    const b = await login();
+    const c = await login(new MemoryStorage(), "Device C");
+    const tokenOf = (s: VaultSession) => (s as unknown as { state: { token: string } }).state.token;
+    const bToken = tokenOf(b);
+    const cToken = tokenOf(c);
+
+    const logout = await fetch(`${url}/api/accounts/logout`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${bToken}`, "content-type": "application/json" },
+      body: "{}",
+    });
+    expect(logout.status).toBe(204);
+    const devices = await a.devices();
+    await a.revokeDevice(devices.find((d) => d.name === "Device C")!.id);
+
+    for (const token of [bToken, cToken]) {
+      const res = await fetch(`${url}/api/sync?since=0`, { headers: { authorization: `Bearer ${token}` } });
+      expect(res.status).toBe(401);
+      expect(await res.json()).toEqual({ error: "Not signed in", reason: "signed_out" });
+    }
+
+    // A Master password change marks the remaining other Devices disconnected, not signed_out.
+    const d = await login(new MemoryStorage(), "Device D");
+    await a.changePassword(PASSWORD, "a brand new master password");
+    const res = await fetch(`${url}/api/sync?since=0`, { headers: { authorization: `Bearer ${tokenOf(d)}` } });
+    expect((await res.json()).reason).toBe("disconnected");
   });
 
   it("rejects malformed item data", async () => {

@@ -142,8 +142,8 @@ export function VaultScreen({ vault }: { vault: Vault }) {
       ? "Syncing…"
       : s.state === "offline"
         ? `Offline${s.pending ? ` · ${s.pending} waiting` : ""}`
-        : s.state === "expired"
-          ? "Signed out"
+        : s.state === "disconnected"
+          ? `Disconnected${s.pending ? ` · ${s.pending} waiting` : ""}`
           : s.state === "error"
             ? "Sync error"
             : s.pending
@@ -183,7 +183,7 @@ export function VaultScreen({ vault }: { vault: Vault }) {
             type="button"
             className={`sync-pill s-${s.state}`}
             title={s.message ?? "Sync now"}
-            onClick={() => (s.state === "expired" ? setReauth(true) : void vault.syncNow())}
+            onClick={() => (s.state === "disconnected" ? setReauth(true) : void vault.syncNow())}
           >
             <Icon name="refresh" size={14} /> {syncLabel}
           </button>
@@ -226,9 +226,10 @@ export function VaultScreen({ vault }: { vault: Vault }) {
           </div>
         </header>
 
-        {s.state === "expired" && (
+        {s.state === "disconnected" && (
           <button type="button" className="banner warn" onClick={() => setReauth(true)}>
-            This device was signed out. Tap to sign in again — your changes are kept until then.
+            Disconnected
+            {s.pending > 0 && ` · ${s.pending} ${s.pending === 1 ? "change" : "changes"} waiting`} · Sign in again
           </button>
         )}
         {vault.unreadable > 0 && (
@@ -305,8 +306,8 @@ function ReauthModal({ vault, onClose }: { vault: Vault; onClose: () => void }) 
     <Modal title="Sign in again" onClose={onClose}>
       <form onSubmit={submit} className="stack">
         <p className="muted small">
-          The server ended this device’s session — usually because the master password was changed on another device. Enter
-          your current master password.
+          This Device is Disconnected — usually because the master password was changed on another Device. Your changes
+          are kept and will upload once you sign in with your current master password.
         </p>
         <Field label="Master password">
           <PasswordInput value={password} onChange={setPassword} autoFocus autoComplete="current-password" />
