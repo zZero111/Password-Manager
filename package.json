@@ -7,6 +7,7 @@
     "typecheck": "pnpm -r typecheck",
     "dev:server": "pnpm --filter @pm/server dev",
     "dev:app": "pnpm --filter @pm/app dev",
-    "tauri": "pnpm --filter @pm/app tauri"
+    "tauri": "pnpm --filter @pm/app tauri",
+    "smoke": "pnpm --filter @pm/app smoke"
   }
 }

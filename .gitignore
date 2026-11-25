@@ -6,3 +6,5 @@ dist/
 apps/app/src-tauri/target/
 apps/app/src-tauri/gen/
 coverage/
+test-results/
+playwright-report/

@@ -109,6 +109,7 @@ pnpm dev:server              # sync server on http://localhost:8080 (tsx watch)
 pnpm tauri dev               # desktop app with hot reload
 # or just the UI in a browser: pnpm dev:app  → http://localhost:1420
 pnpm test                    # unit + end-to-end sync tests
+pnpm smoke                   # UI smoke test: built app + throwaway Server in Chromium (Playwright)
 pnpm typecheck
 ```
 
