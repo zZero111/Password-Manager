@@ -3,6 +3,11 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+  # Check the Android build on PRs that touch the native app or this workflow.
+  pull_request:
+    paths:
+      - ".github/workflows/android.yml"
+      - "apps/app/src-tauri/**"
 
 # Signing: add these repository secrets (see README → "Android signing").
 #   ANDROID_KEYSTORE_BASE64   base64 of your release keystore (.jks)
