@@ -1,0 +1,19 @@
+# Keyhold sync Server for a home box on Tailscale (no domain, no open ports).
+# HTTPS comes from `tailscale serve`; the Server only listens on 127.0.0.1.
+# See README.md in this folder.
+name: keyhold
+services:
+  keyhold:
+    image: keyhold-server
+    build:
+      context: ../..
+      dockerfile: apps/server/Dockerfile
+    restart: unless-stopped
+    environment:
+      SIGNUPS: ${SIGNUPS:-open}   # set SIGNUPS=closed in .env after creating your Account
+      TRUST_PROXY: "true"         # tailscale serve forwards the real Device address
+      LOG: "off"
+    ports:
+      - "127.0.0.1:${KEYHOLD_PORT:-8080}:8080"
+    volumes:
+      - ${KEYHOLD_DATA:-/var/lib/keyhold}:/data
