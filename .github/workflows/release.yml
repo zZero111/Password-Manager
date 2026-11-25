@@ -49,3 +49,15 @@ jobs:
           releaseBody: Desktop installers. Unsigned builds — your OS may warn on first launch.
           releaseDraft: true
           args: ${{ matrix.args }}
+      # Keep the installers from every run (manual runs don't create a Release).
+      - uses: actions/upload-artifact@v4
+        with:
+          name: keyhold-${{ matrix.platform }}
+          path: |
+            apps/app/src-tauri/target/release/bundle/**/*.deb
+            apps/app/src-tauri/target/release/bundle/**/*.rpm
+            apps/app/src-tauri/target/release/bundle/**/*.AppImage
+            apps/app/src-tauri/target/release/bundle/**/*.msi
+            apps/app/src-tauri/target/release/bundle/**/*-setup.exe
+            apps/app/src-tauri/target/universal-apple-darwin/release/bundle/**/*.dmg
+          if-no-files-found: error
