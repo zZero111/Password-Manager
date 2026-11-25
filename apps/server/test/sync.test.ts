@@ -731,3 +731,66 @@ describe("offline erase", () => {
     await start();
   });
 });
+
+describe("account deletion", () => {
+  const rowsFor = (userId: string) => {
+    const db = new DatabaseSync(dbPath, { readOnly: true });
+    const count = (table: string, col: string) =>
+      (db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE ${col} = ?`).get(userId) as { n: number }).n;
+    const rows = { users: count("users", "id"), sessions: count("sessions", "user_id"), items: count("items", "user_id") };
+    db.close();
+    return rows;
+  };
+  const aliceId = () => {
+    const db = new DatabaseSync(dbPath, { readOnly: true });
+    const row = db.prepare("SELECT id FROM users WHERE email = ?").get("alice@example.com") as { id: string };
+    db.close();
+    return row.id;
+  };
+
+  it("wrong Master password fails and changes nothing", async () => {
+    const { session: a, storage } = await registerAlice();
+    await a.save(login_("Kept"));
+    await a.sync();
+    const id = aliceId();
+    const before = rowsFor(id);
+    await expect(a.deleteAccount("not my master password")).rejects.toThrow(/incorrect/i);
+    expect(rowsFor(id)).toEqual(before);
+    expect(before).toEqual({ users: 1, sessions: 1, items: 1 });
+    expect(await storage.load()).not.toBeNull();
+    expect(a.locked).toBe(false);
+    await a.sync();
+  });
+
+  it("correct Master password leaves no rows for the Account and erases this Device", async () => {
+    const { session: a, storage } = await registerAlice();
+    await login();
+    await a.save(login_("Gone"));
+    await a.sync();
+    const id = aliceId();
+    expect(rowsFor(id)).toEqual({ users: 1, sessions: 2, items: 1 });
+    await a.deleteAccount(PASSWORD);
+    expect(rowsFor(id)).toEqual({ users: 0, sessions: 0, items: 0 });
+    expect(await storage.load()).toBeNull();
+    expect(a.locked).toBe(true);
+  });
+
+  it("another Device of the Account erases itself on its next check device", async () => {
+    const { session: a } = await registerAlice();
+    const bStorage = new MemoryStorage();
+    const b = await login(bStorage);
+    await b.save(login_("Unsynced on B"));
+    b.lock();
+    await a.deleteAccount(PASSWORD);
+    expect(await VaultSession.checkDevice(bStorage)).toBe("signedOut");
+    expect(await bStorage.load()).toBeNull();
+  });
+
+  it("the same email can register again afterwards", async () => {
+    const { session: a } = await registerAlice();
+    await a.deleteAccount(PASSWORD);
+    const { session: again } = await registerAlice();
+    expect(again.email).toBe("alice@example.com");
+    expect((await again.list()).items).toEqual([]);
+  });
+});

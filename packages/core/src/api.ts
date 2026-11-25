@@ -1,6 +1,7 @@
 import {
   type ApiErrorBody,
   type ChangePasswordRequest,
+  type DeleteAccountRequest,
   type Device,
   type LoginRequest,
   type LoginResponse,
@@ -114,6 +115,10 @@ export class ApiClient {
   }
   changePassword(req: ChangePasswordRequest) {
     return this.request<void>("POST", "/api/accounts/password", req);
+  }
+  /** Account deletion: removes the Account and everything it stored from this Server. */
+  deleteAccount(req: DeleteAccountRequest) {
+    return this.request<void>("POST", "/api/accounts/delete", req);
   }
   sync(since: number) {
     return this.request<SyncResponse>("GET", `/api/sync?since=${since}`);

@@ -88,6 +88,11 @@ export interface ChangePasswordRequest {
   protectedKey: string;
 }
 
+/** Account deletion: proves the Master password with the current auth key. */
+export interface DeleteAccountRequest {
+  authKey: string;
+}
+
 /**
  * Why the Server no longer accepts a Device (sent with every 401).
  * - "disconnected": e.g. the Master password changed, or the token is unknown.
