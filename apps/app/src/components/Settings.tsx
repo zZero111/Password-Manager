@@ -287,7 +287,7 @@ function MoveServer({ vault }: { vault: Vault }) {
           ? `Deleting your Account from the old Server was skipped: ${res.oldAccountError ?? "unknown error"}.`
           : "Your Account on the old Server was left as it was.";
       setDone(
-        `Moved ${res.uploaded} item${res.uploaded === 1 ? "" : "s"}. ${old} Your other Devices must sign in to ${res.serverUrl}.`,
+        `${res.resumed ? "Resumed the earlier, interrupted Move. " : ""}Moved ${res.uploaded} item${res.uploaded === 1 ? "" : "s"}. ${old} Your other Devices must sign in to ${res.serverUrl}.`,
       );
       setPassword("");
       setServerUrl("");

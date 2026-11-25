@@ -821,7 +821,7 @@ describe("move", () => {
       await a.sync();
 
       const res = await a.moveTo({ serverUrl: second.url, masterPassword: PASSWORD, deleteOld: false });
-      expect(res).toEqual({ uploaded: 2, oldAccountDeleted: false });
+      expect(res).toEqual({ uploaded: 2, oldAccountDeleted: false, resumed: false });
       expect(a.serverUrl).toBe(second.url);
       expect((await storage.load())!.serverUrl).toBe(second.url);
 
@@ -883,6 +883,60 @@ describe("move", () => {
     }
   });
 
+  it("a Move interrupted after the first batch resumes on retry", async () => {
+    const second = await startSecond();
+    try {
+      let pushes = 0;
+      const flaky: typeof fetch = (input, init) => {
+        const u = String(input instanceof Request ? input.url : input);
+        if (u.startsWith(second.url) && init?.method === "POST" && u.endsWith("/api/sync") && ++pushes === 2) {
+          return Promise.reject(new TypeError("network down"));
+        }
+        return fetch(input, init);
+      };
+      const a = await VaultSession.register({
+        serverUrl: url, email: "alice@example.com", password: PASSWORD, deviceName: "Device A",
+        storage: new MemoryStorage(), kdf, fetch: flaky,
+      });
+      await a.addMany(Array.from({ length: 501 }, (_, i) => login_(`Item ${i}`)));
+      await expect(a.moveTo({ serverUrl: second.url, masterPassword: PASSWORD, deleteOld: false })).rejects.toThrow();
+      expect(a.serverUrl).toBe(url);
+      expect((await (await loginAt(second.url)).list()).items).toHaveLength(500);
+
+      const res = await a.moveTo({ serverUrl: second.url, masterPassword: PASSWORD, deleteOld: false });
+      expect(res).toMatchObject({ uploaded: 501, resumed: true });
+      expect(a.serverUrl).toBe(second.url);
+      const fresh = await loginAt(second.url);
+      const list = await fresh.list();
+      expect(list.items).toHaveLength(501);
+      expect(list.unreadable).toBe(0);
+      expect((await a.sync()).pushed).toBe(0);
+    } finally {
+      await second.server.close();
+    }
+  });
+
+  it("an existing Account with the same email but another Master password is never resumed into", async () => {
+    const second = await startSecond();
+    try {
+      const { session: a, storage } = await registerAlice();
+      await a.save(login_("Mine"));
+      await a.sync();
+      await VaultSession.register({
+        serverUrl: second.url, email: "alice@example.com", password: "someone else's", deviceName: "X", storage: new MemoryStorage(), kdf,
+      });
+      const before = structuredClone(await storage.load());
+      await expect(a.moveTo({ serverUrl: second.url, masterPassword: PASSWORD, deleteOld: true })).rejects.toThrow(/already exists/);
+      expect(await storage.load()).toEqual(before);
+      await a.save(login_("Still old"));
+      expect((await a.sync()).pushed).toBe(1);
+      expect(names((await (await login()).list()).items)).toEqual(["Mine", "Still old"]);
+      expect((await (await loginAt(second.url, "someone else's")).list()).items).toHaveLength(0);
+    } finally {
+      await second.server.close();
+    }
+  });
+
   it("with the delete option, the Account is gone from the old Server", async () => {
     const second = await startSecond();
     try {
@@ -890,7 +944,7 @@ describe("move", () => {
       await a.save(login_("Moved"));
       await a.sync();
       const res = await a.moveTo({ serverUrl: second.url, masterPassword: PASSWORD, deleteOld: true });
-      expect(res).toEqual({ uploaded: 1, oldAccountDeleted: true });
+      expect(res).toEqual({ uploaded: 1, oldAccountDeleted: true, resumed: false });
       await expect(login()).rejects.toThrow(/Incorrect/);
       expect(names((await (await loginAt(second.url)).list()).items)).toEqual(["Moved"]);
     } finally {
