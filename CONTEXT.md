@@ -18,6 +18,14 @@ _Avoid_: Password (ambiguous with a login's password), passcode
 A signed-in installation of the app. The same physical machine can appear as more than one Device (e.g. two browsers, or signing in again).
 _Avoid_: Session, client
 
+**Account deletion**:
+Permanently removing an Account and everything it stored from a Server; every one of its Devices is signed out.
+_Avoid_: Close account, deactivate
+
+**Move**:
+Re-homing an Account onto a different Server using a Device's copy of the Vault, with the same Master password, optionally followed by Account deletion on the old Server.
+_Avoid_: Migration, transfer, restore
+
 **Server**:
 The self-hosted service that stores encrypted vaults and relays changes between an Account's Devices. It can never read vault contents.
 _Avoid_: Backend, cloud, sync service
@@ -33,8 +41,8 @@ The Device still holds its vault and can be unlocked, but the Server no longer a
 _Avoid_: Signed out, expired, logged out
 
 **Sign out**:
-Removing a Device: its copy of the vault is erased and the Server stops accepting it.
-_Avoid_: Log out, lock, disconnect
+Removing a Device: its copy of the vault is erased and the Server stops accepting it. Done from another Device, it takes effect the next time the removed Device contacts the Server; until then it keeps its encrypted copy.
+_Avoid_: Log out, lock, disconnect, revoke
 
 ### The vault
 
@@ -59,16 +67,16 @@ An Item holding free text (and optionally custom fields) only.
 _Avoid_: Note, memo
 
 **Folder**:
-A label grouping Items. Each Item is in at most one Folder; a Folder exists only while some Item uses it, and names match ignoring case and surrounding spaces.
+A label grouping Items. Each Item is in at most one Folder; a Folder exists only while some Item uses it. Names match ignoring case and surrounding spaces, and are shown as spelled on the most recently changed Item.
 _Avoid_: Category, collection, tag, group
 
 **Favourite**:
 A flag that pins an Item to the top of lists.
 _Avoid_: Starred, pinned
 
-**Password history**:
-The previous passwords of a Login, newest first, including any password that lost a sync conflict.
-_Avoid_: Old passwords, versions
+**Secret history**:
+Previous values of an Item's secret fields (password, Authenticator key, card number and code, hidden fields), newest first, each labelled with its field. Includes every secret value that lost a Conflict.
+_Avoid_: Password history (it holds more than passwords), versions
 
 **Authenticator key**:
 The secret a website gives when setting up two-factor authentication, from which the app shows rolling verification codes.
@@ -80,16 +88,20 @@ _Avoid_: TOTP, OTP, token
 
 ### Change and history
 
+**Delete**:
+Moving an Item to the Trash.
+_Avoid_: Remove, trash (as a verb)
+
 **Trash**:
-Where a deleted Item goes. It stays restorable for 30 days and is then purged everywhere.
+Where deleted Items wait for 30 days, restorable, before being Purged. Emptying the Trash Purges everything in it.
 _Avoid_: Bin, recycle bin, archive
 
 **Purge**:
-Permanently removing an Item from the Vault on every Device.
-_Avoid_: Delete (a Delete moves to Trash), destroy
+Permanently removing an Item from the Vault on every Device, either by hand or by whichever Device first finds it 30 days in the Trash.
+_Avoid_: Delete permanently (UI label only), destroy
 
 **Conflict**:
-Two Devices changing the same Item before either has synced. The most recent change wins the whole Item; nothing is merged field by field.
+Two Devices changing the same Item before either has synced. The most recent change wins the whole Item; nothing is merged field by field, but the loser's secret values are kept in Secret history.
 _Avoid_: Collision, merge
 
 **Import**:
