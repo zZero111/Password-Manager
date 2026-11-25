@@ -1,27 +1,9 @@
-import { type Device, OFFLINE_ERASE_DAYS, type OfflineEraseDays, type VaultItemData, WrongPasswordError, estimateStrength, importBitwardenJson } from "@pm/core";
+import { type Device, OFFLINE_ERASE_DAYS, type OfflineEraseDays, WrongPasswordError, buildExport, estimateStrength, parseImport } from "@pm/core";
 import { type FormEvent, useEffect, useState } from "react";
 import { saveTextFile } from "../lib/files";
 import { updateSettings, useSettings } from "../lib/settings";
 import type { Vault } from "../lib/useVault";
 import { ErrorText, Field, Icon, PasswordInput } from "./ui";
-
-interface KeyholdExport {
-  format: "keyhold";
-  version: 1;
-  exportedAt: string;
-  items: VaultItemData[];
-}
-
-function parseImport(text: string): { items: VaultItemData[]; warnings: string[] } {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    throw new Error("This file is not valid JSON.");
-  }
-  if ((parsed as KeyholdExport)?.format === "keyhold") return { items: (parsed as KeyholdExport).items, warnings: [] };
-  return importBitwardenJson(text);
-}
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -62,12 +44,7 @@ export function SettingsPage({ vault, onBack }: { vault: Vault; onBack: () => vo
 
   async function onExport() {
     if (!confirm("The export file will contain ALL your passwords unencrypted. Only save it somewhere safe and delete it when done. Continue?")) return;
-    const data: KeyholdExport = {
-      format: "keyhold",
-      version: 1,
-      exportedAt: new Date().toISOString(),
-      items: vault.items.map(({ id: _id, ...rest }) => rest),
-    };
+    const data = buildExport(vault.items);
     await saveTextFile(`keyhold-export-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(data, null, 2));
   }
 

@@ -13,8 +13,10 @@ import {
   MemoryStorage,
   VaultSession,
   WrongPasswordError,
+  buildExport,
   folders,
   newItemData,
+  parseImport,
 } from "@pm/core";
 import { buildServer } from "../src/app";
 
@@ -132,6 +134,44 @@ describe("sync", () => {
     await a.sync();
     await b.sync();
     expect((await b.get(gh.id))?.secretHistory.map((h) => h.value)).toEqual(["s3cret", "hunter2"]);
+  });
+
+  it("export → import into a fresh Account reproduces the live Vault", async () => {
+    const { session: a } = await registerAlice();
+    const gh = await a.save({ ...login_("GitHub"), folder: "Work" });
+    await a.save({ ...gh, login: { ...gh.login!, password: "rotated" } }, gh.id);
+    const gone = await a.save(login_("Old bank"));
+    await a.delete(gone.id);
+    await a.sync();
+
+    const live = await a.list();
+    const file = JSON.stringify(buildExport([...live.items, ...live.trash]));
+
+    const bob = await VaultSession.register({
+      serverUrl: url,
+      email: "bob@example.com",
+      password: PASSWORD,
+      deviceName: "Bob's laptop",
+      storage: new MemoryStorage(),
+      kdf,
+    });
+    await bob.addMany(parseImport(file).items);
+    await bob.sync();
+    const bobOther = await VaultSession.login({
+      serverUrl: url,
+      email: "bob@example.com",
+      password: PASSWORD,
+      deviceName: "Bob's phone",
+      storage: new MemoryStorage(),
+    });
+    await bobOther.sync();
+
+    const strip = ({ id: _id, ...rest }: { id: string }) => rest;
+    const imported = await bobOther.list();
+    expect(imported.trash).toEqual([]);
+    expect(live.items.map((i) => i.name)).toEqual(["GitHub"]);
+    expect(imported.items.map(strip)).toEqual(live.items.map(strip));
+    expect(imported.items[0]?.secretHistory.map((h) => h.value)).toEqual(["hunter2"]);
   });
 
   it("Delete on A → in B's Trash → Restore → back on both", async () => {

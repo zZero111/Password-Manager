@@ -2,6 +2,7 @@ export * from "./api";
 export * from "./bitwarden";
 export * from "./crypto";
 export * from "./encoding";
+export * from "./export";
 export * from "./generator";
 export * from "./protocol";
 export * from "./session";
