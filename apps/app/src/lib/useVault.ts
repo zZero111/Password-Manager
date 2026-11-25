@@ -287,6 +287,15 @@ export function useVault() {
       await guard((s) => s.deleteAccount(masterPassword));
       onErased("accountDeleted");
     },
+    /** Move this Account to another Server; this Device then syncs with the new Server. */
+    async moveTo(o: { serverUrl: string; masterPassword: string; deleteOld: boolean }) {
+      const res = await guard((s) => s.moveTo(o));
+      const s = sessionRef.current!;
+      remember(s.serverUrl, s.email);
+      setDeviceSettingsTick((n) => n + 1); // serverUrl changed on the same session
+      await runSync(s);
+      return { ...res, serverUrl: s.serverUrl };
+    },
     devices: () => guard((s) => s.devices()),
     revokeDevice: (id: string) => guard((s) => s.revokeDevice(id)),
   };

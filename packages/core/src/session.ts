@@ -1,4 +1,4 @@
-import { ApiClient, type FetchFn, DisconnectedError, normalizeServerUrl } from "./api";
+import { ApiClient, ApiError, type FetchFn, DisconnectedError, normalizeServerUrl } from "./api";
 import {
   DEFAULT_KDF,
   DecryptionError,
@@ -12,7 +12,7 @@ import {
   rewrapVaultKey,
   unwrapVaultKey,
 } from "./crypto";
-import type { PushChange, ServerItem } from "./protocol";
+import { LIMITS, type PushChange, type ServerItem } from "./protocol";
 import { type VaultItem, type VaultItemData, applyEdit, folderKey, folders, inFolder, isTrashed, newId, normalizeItem, resolveFolder, settleConflict, trashExpired } from "./vault";
 
 /** Everything persisted on a device. Contains no plaintext secrets. */
@@ -136,6 +136,18 @@ export interface SyncResult {
 
 /** Injectable clock, so the 30-day Trash can be tested. */
 export type Clock = () => Date;
+
+/** What a Move did. */
+export interface MoveResult {
+  /** Items uploaded to the new Server (live and Trash). */
+  uploaded: number;
+  /** True only if the old Account was deleted from the old Server. */
+  oldAccountDeleted: boolean;
+  /** Why deleting the old Account was skipped, when it was asked for. */
+  oldAccountError?: string;
+  /** True if an earlier, interrupted Move to the same Server was resumed. */
+  resumed: boolean;
+}
 const realClock: Clock = () => new Date();
 
 export interface AccountOptions {
@@ -156,14 +168,14 @@ export class VaultSession {
   private vaultKey: CryptoKey | null;
   private cache = new Map<string, Payload>();
   private inFlight: Promise<SyncResult> | null = null;
-  private readonly api: ApiClient;
+  private api: ApiClient;
   private erasedFlag = false;
 
   private constructor(
     private state: LocalVault,
     vaultKey: CryptoKey,
     private storage: VaultStorage,
-    fetchFn?: FetchFn,
+    private readonly fetchFn?: FetchFn,
     private readonly now: Clock = realClock,
   ) {
     this.vaultKey = vaultKey;
@@ -327,6 +339,145 @@ export class VaultSession {
     const { authKey } = await deriveMasterKeys(masterPassword, this.state.salt, this.state.kdf);
     await this.reach(() => this.api.deleteAccount({ authKey }));
     await this.erase();
+  }
+
+  /**
+   * Move: re-home this Account onto another Server from this Device's copy of
+   * the Vault. Registers there with the same email, salt, KDF settings and
+   * protected vault key (so the same Master password works), signs in, and
+   * uploads every live and Trash Item plus pending changes as the existing
+   * ciphertexts under their existing ids — never plaintext. Purge tombstones
+   * are not carried over. Only once all of that succeeded does this Device
+   * switch to the new Server; until then it is left exactly as it was.
+   * Then, if asked, Account deletion on the old Server is attempted; if that
+   * fails the Move still succeeds and the result says why it was skipped.
+   */
+  async moveTo(opts: {
+    serverUrl: string;
+    masterPassword: string;
+    deviceName?: string;
+    deleteOld: boolean;
+  }): Promise<MoveResult> {
+    const serverUrl = normalizeServerUrl(opts.serverUrl);
+    if (serverUrl === this.state.serverUrl) throw new Error("This Device already uses that Server");
+    const { email, salt, kdf, protectedKey } = this.state;
+    const { kek, authKey } = await deriveMasterKeys(opts.masterPassword, salt, kdf);
+    await unwrapVaultKey(kek, protectedKey); // throws WrongPasswordError
+
+    // Snapshot what to upload: the Server copy of each Item, overridden by pending changes.
+    const latest = new Map<string, { data: string; deleted: boolean }>();
+    for (const si of Object.values(this.state.items)) latest.set(si.id, si);
+    for (const pc of Object.values(this.state.pending)) latest.set(pc.id, pc);
+    const changes: PushChange[] = [];
+    for (const [id, { data, deleted }] of latest) {
+      if (!deleted) changes.push({ id, data, deleted: false, baseRevision: 0 });
+    }
+
+    const deviceName = opts.deviceName ?? this.state.deviceName;
+    const newApi = new ApiClient(serverUrl, null, this.fetchFn);
+    let resumedLogin: Awaited<ReturnType<ApiClient["login"]>> | null = null;
+    try {
+      await newApi.register({ email, authKey, salt, kdf, protectedKey });
+    } catch (e) {
+      if (!(e instanceof ApiError && e.status === 409)) throw e;
+      // An earlier Move may have been interrupted. Resume only if this is
+      // provably the same Account with the same vault key; never someone else's.
+      resumedLogin = await this.ownAccountLogin(newApi, email, authKey, kek, deviceName);
+      if (!resumedLogin) throw e;
+    }
+    const resumed = resumedLogin !== null;
+    const res = resumedLogin ?? (await newApi.login({ email, authKey, deviceName }));
+    newApi.token = res.token;
+    const items: Record<string, ServerItem> = {};
+    if (resumed) {
+      // Upload only what the new Server is missing or has different.
+      const existing = await newApi.sync(0);
+      for (const si of existing.items) items[si.id] = si;
+      const todo: PushChange[] = [];
+      for (const c of changes) {
+        const si = items[c.id];
+        if (!si) todo.push(c);
+        else if (si.deleted || si.data !== c.data) todo.push({ ...c, baseRevision: si.revision });
+      }
+      changes.splice(0, changes.length, ...todo);
+    }
+    for (let i = 0; i < changes.length; i += LIMITS.maxBatch) {
+      let batch = changes.slice(i, i + LIMITS.maxBatch);
+      for (let attempt = 0; batch.length > 0; attempt++) {
+        const pushed = await newApi.push(batch);
+        const byId = new Map(batch.map((c) => [c.id, c]));
+        for (const { id, revision } of pushed.applied) {
+          const c = byId.get(id)!;
+          items[id] = { id, data: c.data, deleted: false, revision };
+        }
+        if (pushed.conflicts.length === 0) break;
+        if (!resumed || attempt >= 3) throw new Error("The new Server already had Items for this Account");
+        // This Device is the source of the Move: its copy wins.
+        batch = pushed.conflicts.map((si) => ({ ...byId.get(si.id)!, baseRevision: si.revision }));
+      }
+    }
+    for (const [id, si] of Object.entries(items)) if (si.deleted) delete items[id];
+
+    // Everything is on the new Server: switch this Device over.
+    const oldApi = this.api;
+    const keepPending: Record<string, PushChange> = {};
+    // Edits made while uploading are kept as pending against the new Server.
+    for (const [id, pc] of Object.entries(this.state.pending)) {
+      if (latest.get(id) !== pc && !pc.deleted) keepPending[id] = { ...pc, baseRevision: items[id]?.revision ?? 0 };
+    }
+    Object.assign(this.state, {
+      serverUrl,
+      userId: res.userId,
+      deviceName,
+      token: res.token,
+      revision: 0,
+      items,
+      pending: keepPending,
+      lastReachedServer: this.now().toISOString(),
+    });
+    this.api = newApi;
+    this.cache.clear();
+    await this.persist();
+
+    const result: MoveResult = { uploaded: Object.keys(items).length, oldAccountDeleted: false, resumed };
+    if (opts.deleteOld) {
+      try {
+        await oldApi.deleteAccount({ authKey });
+        result.oldAccountDeleted = true;
+      } catch (e) {
+        result.oldAccountError = e instanceof Error ? e.message : String(e);
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Signs `email` in on `api`'s Server; returns the login only if that worked
+   * with this Device's auth key and its protected vault key unwraps with this
+   * Device's kek, else null.
+   */
+  private async ownAccountLogin(
+    api: ApiClient,
+    email: string,
+    authKey: string,
+    kek: Parameters<typeof unwrapVaultKey>[0],
+    deviceName: string,
+  ) {
+    let res;
+    try {
+      res = await api.login({ email, authKey, deviceName });
+    } catch {
+      return null;
+    }
+    try {
+      await unwrapVaultKey(kek, res.protectedKey);
+      return res;
+    } catch {
+      api.token = res.token;
+      await api.logout().catch(() => {});
+      api.token = null;
+      return null;
+    }
   }
 
   /** Sign out on the server and erase this device's copy of the vault. */

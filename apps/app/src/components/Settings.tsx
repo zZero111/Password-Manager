@@ -145,6 +145,7 @@ export function SettingsPage({ vault, onBack }: { vault: Vault; onBack: () => vo
 
         <ChangePassword vault={vault} />
         <Devices vault={vault} />
+        <MoveServer vault={vault} />
         <DeleteAccount vault={vault} />
 
         <Section title="Import">
@@ -262,6 +263,66 @@ function ChangePassword({ vault }: { vault: Vault }) {
 }
 
 /** Account deletion: permanent, guarded by the Master password and a typed confirmation. */
+/** Move: re-home this Account onto another Server from this Device's encrypted copy. */
+function MoveServer({ vault }: { vault: Vault }) {
+  const [serverUrl, setServerUrl] = useState("");
+  const [password, setPassword] = useState("");
+  const [deleteOld, setDeleteOld] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [done, setDone] = useState<string | null>(null);
+
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    setDone(null);
+    try {
+      const res = await vault.moveTo({ serverUrl, masterPassword: password, deleteOld });
+      const old = res.oldAccountDeleted
+        ? "Your Account was deleted from the old Server."
+        : deleteOld
+          ? `Deleting your Account from the old Server was skipped: ${res.oldAccountError ?? "unknown error"}.`
+          : "Your Account on the old Server was left as it was.";
+      setDone(
+        `${res.resumed ? "Resumed the earlier, interrupted Move. " : ""}Moved ${res.uploaded} item${res.uploaded === 1 ? "" : "s"}. ${old} Your other Devices must sign in to ${res.serverUrl}.`,
+      );
+      setPassword("");
+      setServerUrl("");
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Section title="Move to a new Server">
+      <form onSubmit={submit} className="stack" aria-label="Move to a new Server">
+        <p className="muted small">
+          Creates your Account on another Server with the same Master password and uploads every Item (Trash included),
+          still encrypted. This Device then syncs with the new Server.
+        </p>
+        <Field label="New Server URL">
+          <input value={serverUrl} onChange={(e) => setServerUrl(e.target.value)} placeholder="https://" autoComplete="url" spellCheck={false} />
+        </Field>
+        <Field label="Master password">
+          <PasswordInput value={password} onChange={setPassword} autoComplete="current-password" />
+        </Field>
+        <label className="check">
+          <input type="checkbox" checked={deleteOld} onChange={(e) => setDeleteOld(e.target.checked)} />
+          <span>Delete my Account from the old Server afterwards</span>
+        </label>
+        <ErrorText error={error} />
+        {done && <p className="success" role="status">{done}</p>}
+        <button className="btn" disabled={busy || !serverUrl.trim() || !password}>
+          {busy ? "Moving…" : "Move to new Server"}
+        </button>
+      </form>
+    </Section>
+  );
+}
+
 function DeleteAccount({ vault }: { vault: Vault }) {
   const [password, setPassword] = useState("");
   const [typed, setTyped] = useState("");
