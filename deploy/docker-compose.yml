@@ -1,0 +1,36 @@
+# Keyhold sync server behind Caddy (automatic HTTPS via Let's Encrypt).
+#
+#   1. Point a DNS record (e.g. vault.example.com) at this machine; open ports 80 and 443.
+#   2. cp .env.example .env  and set KEYHOLD_DOMAIN.
+#   3. docker compose up -d --build
+#   4. Create your account(s) in the app, then set SIGNUPS=closed and run
+#      docker compose up -d  so nobody else can register.
+services:
+  keyhold:
+    build:
+      context: ..
+      dockerfile: apps/server/Dockerfile
+    restart: unless-stopped
+    environment:
+      SIGNUPS: ${SIGNUPS:-open}
+      TRUST_PROXY: "true"
+    volumes:
+      - keyhold-data:/data
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      KEYHOLD_DOMAIN: ${KEYHOLD_DOMAIN:?set KEYHOLD_DOMAIN in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    depends_on:
+      - keyhold
+
+volumes:
+  keyhold-data:
+  caddy-data:

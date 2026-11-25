@@ -1,0 +1,12 @@
+{
+  "name": "password-manager",
+  "private": true,
+  "packageManager": "pnpm@10.28.0",
+  "scripts": {
+    "test": "pnpm -r test",
+    "typecheck": "pnpm -r typecheck",
+    "dev:server": "pnpm --filter @pm/server dev",
+    "dev:app": "pnpm --filter @pm/app dev",
+    "tauri": "pnpm --filter @pm/app tauri"
+  }
+}
