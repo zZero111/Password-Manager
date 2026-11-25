@@ -400,6 +400,37 @@ describe("sync", () => {
     const b = await login();
     expect((await b.list()).items).toHaveLength(120);
   });
+
+  it("syncs more than 500 waiting changes in batches the Server accepts", async () => {
+    const { session: a } = await registerAlice();
+    await a.addMany(Array.from({ length: 1201 }, (_, i) => login_(`Site ${i}`)));
+    const r = await a.sync();
+    expect(r.pushed).toBe(1201);
+    expect(a.pendingCount).toBe(0);
+    const b = await login();
+    expect((await b.list()).items).toHaveLength(1201);
+  });
+
+  it("settles a Conflict on an Item that falls in a later batch", async () => {
+    const { session: a } = await registerAlice();
+    const b = await login();
+    const item = await a.save(login_("Shared"));
+    await a.sync();
+    await b.sync();
+
+    await a.save({ ...item, notes: "from A" }, item.id);
+    await a.sync();
+    // B queues 500 Imported Items first, so its newer edit lands in the second batch.
+    await b.addMany(Array.from({ length: 500 }, (_, i) => login_(`Import ${i}`)));
+    await new Promise((r) => setTimeout(r, 5));
+    await b.save({ ...item, notes: "from B" }, item.id);
+    await b.sync();
+    await a.sync();
+
+    expect((await a.get(item.id))?.notes).toBe("from B");
+    expect((await a.list()).items).toHaveLength(501);
+    expect(a.pendingCount + b.pendingCount).toBe(0);
+  });
 });
 
 describe("folders", () => {

@@ -773,22 +773,30 @@ export class VaultSession {
 
   private async pushPending(result: SyncResult): Promise<void> {
     for (let attempt = 0; attempt < 3; attempt++) {
-      const sent = Object.values(this.state.pending);
-      if (sent.length === 0) break;
-      const res = await this.reach(() => this.api.push(sent));
-      const byId = new Map(sent.map((c) => [c.id, c]));
-      for (const { id, revision } of res.applied) {
-        const change = byId.get(id)!;
-        this.state.items[id] = { id, data: change.data, deleted: change.deleted, revision };
-        if (this.state.pending[id] === change) delete this.state.pending[id];
-        else if (this.state.pending[id]) this.state.pending[id].baseRevision = revision; // edited mid-flight
-        result.pushed++;
+      const all = Object.values(this.state.pending);
+      if (all.length === 0) break;
+      let conflicts = 0;
+      // The Server accepts at most LIMITS.maxBatch changes per upload.
+      for (let i = 0; i < all.length; i += LIMITS.maxBatch) {
+        const sent = all.slice(i, i + LIMITS.maxBatch);
+        const res = await this.reach(() => this.api.push(sent));
+        const byId = new Map(sent.map((c) => [c.id, c]));
+        for (const { id, revision } of res.applied) {
+          const change = byId.get(id)!;
+          this.state.items[id] = { id, data: change.data, deleted: change.deleted, revision };
+          if (this.state.pending[id] === change) delete this.state.pending[id];
+          else if (this.state.pending[id]) this.state.pending[id].baseRevision = revision; // edited mid-flight
+          result.pushed++;
+        }
+        for (const si of res.conflicts) {
+          await this.mergeRemote(si);
+          result.conflicts++;
+          conflicts++;
+        }
+        // Keep progress if a later batch fails (e.g. the connection drops).
+        await this.persist();
       }
-      for (const si of res.conflicts) {
-        await this.mergeRemote(si);
-        result.conflicts++;
-      }
-      if (res.conflicts.length === 0) break;
+      if (conflicts === 0) break;
     }
   }
 
