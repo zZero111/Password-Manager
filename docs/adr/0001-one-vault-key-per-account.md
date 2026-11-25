@@ -1,0 +1,3 @@
+# One vault key per Account; sharing will be a separate container
+
+Each Account has exactly one vault key, and every Item is encrypted with it. We chose this over per-Item or per-collection keys because v1 serves people who don't share Items, and a single key keeps the encryption, sync and master password change simple. Sharing between Accounts is a known future need (a household sharing a Wi-Fi password or a streaming login). When it comes, it will be a new kind of container with its own key, wrapped for each member's Account. Existing Items keep their current encryption: shared Items will live in the new container rather than the vault being re-keyed.
