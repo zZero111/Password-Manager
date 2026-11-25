@@ -1,0 +1,25 @@
+{
+  "name": "@pm/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "start": "node --disable-warning=ExperimentalWarning dist/server.js",
+    "build": "esbuild src/main.ts --bundle --platform=node --target=node22 --format=esm --outfile=dist/server.js --banner:js=\"import{createRequire}from'module';const require=createRequire(import.meta.url);\"",
+    "test": "vitest run",
+    "typecheck": "tsc -p ."
+  },
+  "dependencies": {
+    "@fastify/cors": "^11.4.3",
+    "fastify": "^5.12.8"
+  },
+  "devDependencies": {
+    "@pm/core": "workspace:*",
+    "@types/node": "^22",
+    "esbuild": "^0.28.2",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.0",
+    "vitest": "^5.1.1"
+  }
+}
