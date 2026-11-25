@@ -13,7 +13,7 @@ import {
   unwrapVaultKey,
 } from "./crypto";
 import type { PushChange, ServerItem } from "./protocol";
-import { type VaultItem, type VaultItemData, applyEdit, newId } from "./vault";
+import { type VaultItem, type VaultItemData, applyEdit, isTrashed, newId, trashExpired } from "./vault";
 
 /** Everything persisted on a device. Contains no plaintext secrets. */
 export interface LocalVault {
@@ -72,7 +72,13 @@ export interface SyncResult {
   pulled: number;
   pushed: number;
   conflicts: number;
+  /** Trash Items this Device Purged because they had been in the Trash too long. */
+  purged: number;
 }
+
+/** Injectable clock, so the 30-day Trash can be tested. */
+export type Clock = () => Date;
+const realClock: Clock = () => new Date();
 
 export interface AccountOptions {
   serverUrl: string;
@@ -81,6 +87,7 @@ export interface AccountOptions {
   deviceName: string;
   storage: VaultStorage;
   fetch?: FetchFn;
+  now?: Clock;
 }
 
 const stripId = ({ id: _id, ...rest }: VaultItem): VaultItemData => rest;
@@ -98,6 +105,7 @@ export class VaultSession {
     vaultKey: CryptoKey,
     private storage: VaultStorage,
     fetchFn?: FetchFn,
+    private readonly now: Clock = realClock,
   ) {
     this.vaultKey = vaultKey;
     this.api = new ApiClient(state.serverUrl, state.token, fetchFn);
@@ -149,18 +157,23 @@ export class VaultSession {
       state.revision = previous.revision;
     }
     await opts.storage.save(state);
-    const session = new VaultSession(state, vaultKey, opts.storage, opts.fetch);
+    const session = new VaultSession(state, vaultKey, opts.storage, opts.fetch, opts.now);
     await session.sync();
     return session;
   }
 
   /** Unlock the vault stored on this device. Works offline. */
-  static async unlock(storage: VaultStorage, password: string, fetchFn?: FetchFn): Promise<VaultSession> {
+  static async unlock(
+    storage: VaultStorage,
+    password: string,
+    fetchFn?: FetchFn,
+    opts: { now?: Clock } = {},
+  ): Promise<VaultSession> {
     const state = await storage.load();
     if (!state) throw new Error("No vault on this device");
     const { kek } = await deriveMasterKeys(password, state.salt, state.kdf);
     const vaultKey = await unwrapVaultKey(kek, state.protectedKey);
-    return new VaultSession(state, vaultKey, storage, fetchFn);
+    return new VaultSession(state, vaultKey, storage, fetchFn, opts.now);
   }
 
   /**
@@ -248,23 +261,27 @@ export class VaultSession {
     return this.state.pending[id] ?? this.state.items[id];
   }
 
-  /** All live items. Items that fail to decrypt are reported in `unreadable`. */
-  async list(): Promise<{ items: VaultItem[]; unreadable: number }> {
+  /**
+   * All Items: `items` are live, `trash` are in the Trash. Items that fail to
+   * decrypt are reported in `unreadable`.
+   */
+  async list(): Promise<{ items: VaultItem[]; trash: VaultItem[]; unreadable: number }> {
     const ids = new Set([...Object.keys(this.state.items), ...Object.keys(this.state.pending)]);
     const items: VaultItem[] = [];
+    const trash: VaultItem[] = [];
     let unreadable = 0;
     for (const id of ids) {
       const rec = this.current(id);
       if (!rec || rec.deleted) continue;
       try {
         const p = await this.decrypt(id, rec.data);
-        if (!("tombstone" in p)) items.push({ ...p, id });
+        if (!("tombstone" in p)) (isTrashed(p) ? trash : items).push({ ...p, id });
       } catch (e) {
         if (e instanceof DecryptionError) unreadable++;
         else throw e;
       }
     }
-    return { items, unreadable };
+    return { items, trash, unreadable };
   }
 
   async get(id: string): Promise<VaultItem | undefined> {
@@ -282,19 +299,42 @@ export class VaultSession {
     const previous = await this.get(id);
     // The id lives outside the encrypted payload (it's bound in as AAD instead).
     const { id: _ignored, ...plain } = data as VaultItem;
-    const final = applyEdit(previous && stripId(previous), plain);
+    const final = applyEdit(previous && stripId(previous), plain, this.now());
     const ct = await encryptJson(this.key(), final, itemAad(id));
     this.state.pending[id] = { id, data: ct, deleted: false, baseRevision: this.baseRevision(id) };
     await this.persist();
     return { ...final, id };
   }
 
-  async remove(id: string): Promise<void> {
+  /** Delete: move an Item to the Trash. An ordinary edit that syncs to every Device. */
+  async delete(id: string): Promise<void> {
+    const item = await this.get(id);
+    if (!item || isTrashed(item)) return;
+    await this.save({ ...item, trashedAt: this.now().toISOString() }, id);
+  }
+
+  /** Take an Item out of the Trash, with its Folder and fields intact. */
+  async restore(id: string): Promise<void> {
+    const item = await this.get(id);
+    if (!item || !isTrashed(item)) return;
+    const { trashedAt: _t, ...rest } = item;
+    await this.save(rest, id);
+  }
+
+  /** Purge every Item in the Trash. Returns how many were Purged. */
+  async emptyTrash(): Promise<number> {
+    const { trash } = await this.list();
+    for (const item of trash) await this.purge(item.id);
+    return trash.length;
+  }
+
+  /** Purge: permanently remove an Item on every Device. */
+  async purge(id: string): Promise<void> {
     if (!this.state.items[id]) {
       // Never reached the server: just drop it.
       delete this.state.pending[id];
     } else {
-      const tomb: Tombstone = { tombstone: true, deletedAt: new Date().toISOString() };
+      const tomb: Tombstone = { tombstone: true, deletedAt: this.now().toISOString() };
       const ct = await encryptJson(this.key(), tomb, itemAad(id));
       this.state.pending[id] = { id, data: ct, deleted: true, baseRevision: this.baseRevision(id) };
     }
@@ -323,7 +363,7 @@ export class VaultSession {
   }
 
   private async doSync(): Promise<SyncResult> {
-    const result: SyncResult = { pulled: 0, pushed: 0, conflicts: 0 };
+    const result: SyncResult = { pulled: 0, pushed: 0, conflicts: 0, purged: 0 };
     try {
       const pulled = await this.api.sync(this.state.revision);
       for (const si of pulled.items) {
@@ -331,25 +371,18 @@ export class VaultSession {
         result.pulled++;
       }
       this.state.revision = Math.max(this.state.revision, pulled.revision);
+      await this.pushPending(result);
 
-      for (let attempt = 0; attempt < 3; attempt++) {
-        const sent = Object.values(this.state.pending);
-        if (sent.length === 0) break;
-        const res = await this.api.push(sent);
-        const byId = new Map(sent.map((c) => [c.id, c]));
-        for (const { id, revision } of res.applied) {
-          const change = byId.get(id)!;
-          this.state.items[id] = { id, data: change.data, deleted: change.deleted, revision };
-          if (this.state.pending[id] === change) delete this.state.pending[id];
-          else if (this.state.pending[id]) this.state.pending[id].baseRevision = revision; // edited mid-flight
-          result.pushed++;
-        }
-        for (const si of res.conflicts) {
-          await this.mergeRemote(si);
-          result.conflicts++;
-        }
-        if (res.conflicts.length === 0) break;
+      // After a successful sync, Purge anything 30+ days in the Trash, on every Device.
+      const now = this.now();
+      const { trash } = this.locked ? { trash: [] } : await this.list();
+      for (const item of trash) {
+        if (!trashExpired(item, now)) continue;
+        await this.purge(item.id);
+        result.purged++;
       }
+      if (result.purged > 0) await this.pushPending(result);
+
       await this.persist();
       return result;
     } catch (e) {
@@ -359,6 +392,27 @@ export class VaultSession {
       }
       await this.persist();
       throw e;
+    }
+  }
+
+  private async pushPending(result: SyncResult): Promise<void> {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const sent = Object.values(this.state.pending);
+      if (sent.length === 0) break;
+      const res = await this.api.push(sent);
+      const byId = new Map(sent.map((c) => [c.id, c]));
+      for (const { id, revision } of res.applied) {
+        const change = byId.get(id)!;
+        this.state.items[id] = { id, data: change.data, deleted: change.deleted, revision };
+        if (this.state.pending[id] === change) delete this.state.pending[id];
+        else if (this.state.pending[id]) this.state.pending[id].baseRevision = revision; // edited mid-flight
+        result.pushed++;
+      }
+      for (const si of res.conflicts) {
+        await this.mergeRemote(si);
+        result.conflicts++;
+      }
+      if (res.conflicts.length === 0) break;
     }
   }
 

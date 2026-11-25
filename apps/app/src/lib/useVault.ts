@@ -25,6 +25,7 @@ export function useVault() {
   const [phase, setPhase] = useState<Phase>("loading");
   const [session, setSession] = useState<VaultSession | null>(null);
   const [items, setItems] = useState<VaultItem[]>([]);
+  const [trash, setTrash] = useState<VaultItem[]>([]);
   const [unreadable, setUnreadable] = useState(0);
   const [lockedEmail, setLockedEmail] = useState("");
   const [sync, setSync] = useState<SyncStatus>({ state: "idle", lastSyncAt: null, pending: 0 });
@@ -48,6 +49,7 @@ export function useVault() {
     if (!s || s.locked) return;
     const res = await s.list();
     setItems(res.items);
+    setTrash(res.trash);
     setUnreadable(res.unreadable);
     setSync((st) => ({ ...st, pending: s.pendingCount }));
   }, []);
@@ -100,6 +102,7 @@ export function useVault() {
     sessionRef.current?.lock();
     setSession(null);
     setItems([]);
+    setTrash([]);
     setPhase((p) => (p === "unlocked" ? "locked" : p));
   }, []);
 
@@ -129,9 +132,17 @@ export function useVault() {
 
   type Creds = Omit<AccountOptions, "storage">;
 
+  async function change(op: (s: VaultSession) => Promise<unknown>) {
+    const s = sessionRef.current!;
+    await op(s);
+    await refresh(s);
+    void runSync(s);
+  }
+
   return {
     phase,
     items,
+    trash,
     unreadable,
     sync,
     lockedEmail,
@@ -156,6 +167,7 @@ export function useVault() {
       else await idbStorage.clear();
       setSession(null);
       setItems([]);
+      setTrash([]);
       setPhase("signedOut");
     },
     async save(data: VaultItemData, id?: string) {
@@ -165,12 +177,11 @@ export function useVault() {
       void runSync(s);
       return saved;
     },
-    async remove(id: string) {
-      const s = sessionRef.current!;
-      await s.remove(id);
-      await refresh(s);
-      void runSync(s);
-    },
+    /** Delete (move to the Trash), Restore, Purge ("Delete permanently") and Empty Trash all sync right away. */
+    delete: (id: string) => change((s) => s.delete(id)),
+    restore: (id: string) => change((s) => s.restore(id)),
+    purge: (id: string) => change((s) => s.purge(id)),
+    emptyTrash: () => change((s) => s.emptyTrash()),
     async importItems(data: VaultItemData[]) {
       const s = sessionRef.current!;
       const n = await s.addMany(data);

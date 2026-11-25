@@ -1,4 +1,12 @@
-import { type ItemType, type VaultItem, type VaultItemData, emptyCard, emptyLogin, parseTotp } from "@pm/core";
+import {
+  type ItemType,
+  type VaultItem,
+  type VaultItemData,
+  emptyCard,
+  emptyLogin,
+  parseTotp,
+  trashDaysLeft,
+} from "@pm/core";
 import { type FormEvent, useState } from "react";
 import { Generator } from "./Generator";
 import { ErrorText, Field, Icon, IconButton, type IconName, Modal, PasswordInput, TotpRow, ValueRow } from "./ui";
@@ -25,6 +33,11 @@ function fmt(iso: string) {
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
 }
 
+export function daysLeftLabel(item: VaultItemData) {
+  const n = trashDaysLeft(item);
+  return n === 0 ? "deleted permanently at next sync" : `${n} ${n === 1 ? "day" : "days"} left`;
+}
+
 // ── View ──────────────────────────────────────────────────────────────
 
 export function ItemView({
@@ -33,12 +46,15 @@ export function ItemView({
   onDelete,
   onToggleFavorite,
   onBack,
+  trash,
 }: {
   item: VaultItem;
   onEdit: () => void;
   onDelete: () => void;
   onToggleFavorite: () => void;
   onBack: () => void;
+  /** Set for a Trash Item: shown read-only, with Restore and Delete permanently instead of Edit and Delete. */
+  trash?: { onRestore: () => void; onPurge: () => void };
 }) {
   const [showHistory, setShowHistory] = useState(false);
   const { login, card } = item;
@@ -58,15 +74,23 @@ export function ItemView({
             {item.folder && ` · ${item.folder}`}
           </span>
         </div>
-        <IconButton
-          icon="star"
-          label={item.favorite ? "Remove from favourites" : "Add to favourites"}
-          active={item.favorite}
-          onClick={onToggleFavorite}
-        />
-        <button type="button" className="btn" onClick={onEdit}>
-          Edit
-        </button>
+        {trash ? (
+          <button type="button" className="btn" onClick={trash.onRestore}>
+            <Icon name="refresh" /> Restore
+          </button>
+        ) : (
+          <>
+            <IconButton
+              icon="star"
+              label={item.favorite ? "Remove from favourites" : "Add to favourites"}
+              active={item.favorite}
+              onClick={onToggleFavorite}
+            />
+            <button type="button" className="btn" onClick={onEdit}>
+              Edit
+            </button>
+          </>
+        )}
       </header>
 
       <div className="detail-body">
@@ -74,13 +98,13 @@ export function ItemView({
           <section className="card-section">
             <ValueRow label="Username" value={login.username} />
             <ValueRow label="Password" value={login.password} secret />
-            {login.totp && <TotpRow uri={login.totp} />}
+            {login.totp && !trash && <TotpRow uri={login.totp} />}
           </section>
         )}
         {login && login.uris.length > 0 && (
           <section className="card-section">
             {login.uris.map((u, i) => (
-              <ValueRow key={i} label={i === 0 ? "Website" : `Website ${i + 1}`} value={u} href={safeHref(u)} />
+              <ValueRow key={i} label={i === 0 ? "Website" : `Website ${i + 1}`} value={u} href={trash ? undefined : safeHref(u)} />
             ))}
           </section>
         )}
@@ -111,6 +135,7 @@ export function ItemView({
         )}
 
         <div className="meta muted small">
+          {trash && <span>In the Trash · {daysLeftLabel(item)}</span>}
           <span>Updated {fmt(item.modifiedAt)}</span>
           <span>Created {fmt(item.createdAt)}</span>
           {item.passwordHistory.length > 0 && (
@@ -120,13 +145,21 @@ export function ItemView({
           )}
         </div>
 
-        <button
-          type="button"
-          className="btn danger"
-          onClick={() => confirm(`Delete “${item.name}”? This syncs to all your devices.`) && onDelete()}
-        >
-          <Icon name="trash" /> Delete
-        </button>
+        {trash ? (
+          <button
+            type="button"
+            className="btn danger"
+            onClick={() =>
+              confirm(`Permanently delete “${item.name}” on all your devices? This can’t be undone.`) && trash.onPurge()
+            }
+          >
+            <Icon name="trash" /> Delete permanently
+          </button>
+        ) : (
+          <button type="button" className="btn danger" onClick={onDelete}>
+            <Icon name="trash" /> Delete
+          </button>
+        )}
       </div>
 
       {showHistory && (
