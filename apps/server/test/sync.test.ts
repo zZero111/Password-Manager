@@ -11,6 +11,7 @@ import {
   type KdfParams,
   MIN_KDF,
   MemoryStorage,
+  NetworkError,
   VaultSession,
   WrongPasswordError,
   newItemData,
@@ -599,5 +600,128 @@ describe("check device", () => {
     await expect(b.save(login_("after"))).rejects.toThrow();
     await expect(b.devices()).rejects.toBeInstanceOf(DeviceErasedError);
     expect(await bStorage.load()).toBeNull();
+  });
+});
+
+describe("offline erase", () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  const day0 = new Date("2030-01-01T00:00:00.000Z").getTime();
+  const day = (n: number) => () => new Date(day0 + n * DAY);
+  const stopServer = async () => {
+    await app.close();
+  };
+
+  /** B signed in, Offline erase set to `days` and the Server last reached on day 0. */
+  async function deviceB(days: 14 | null) {
+    const { session: a } = await registerAlice();
+    const bStorage = new MemoryStorage();
+    (await login(bStorage)).lock();
+    const b = await VaultSession.unlock(bStorage, PASSWORD, undefined, { now: day(0) });
+    await b.setOfflineErase(days);
+    await b.sync();
+    b.lock();
+    return { bStorage, a };
+  }
+
+  it("is Off by default on a new Device", async () => {
+    await registerAlice();
+    const bStorage = new MemoryStorage();
+    const b = await login(bStorage);
+    expect(b.offlineEraseDays).toBeNull();
+    expect((await bStorage.load())!.offlineEraseDays).toBeUndefined();
+    b.lock();
+    await stopServer();
+    // Off: years offline still keeps the vault.
+    expect(await VaultSession.checkDevice(bStorage, undefined, { now: day(5000) })).toBe("offline");
+    expect(await bStorage.load()).not.toBeNull();
+    await start();
+  });
+
+  it("14-day limit, offline on day 15 → erased", async () => {
+    const { bStorage } = await deviceB(14);
+    expect((await bStorage.load())!.offlineEraseDays).toBe(14);
+    await stopServer();
+    expect(await VaultSession.checkDevice(bStorage, undefined, { now: day(15) })).toBe("offlineErased");
+    expect(await bStorage.load()).toBeNull();
+    expect(await VaultSession.checkDevice(bStorage, undefined, { now: day(15) })).toBe("noVault");
+    await start();
+  });
+
+  it("14-day limit, offline on day 13 → kept", async () => {
+    const { bStorage } = await deviceB(14);
+    const before = await bStorage.load();
+    await stopServer();
+    expect(await VaultSession.checkDevice(bStorage, undefined, { now: day(13) })).toBe("offline");
+    expect(await bStorage.load()).toEqual(before);
+    await start();
+  });
+
+  it("past the limit but the Server is reachable → not erased, countdown reset", async () => {
+    const { bStorage } = await deviceB(14);
+    expect(await VaultSession.checkDevice(bStorage, undefined, { now: day(30) })).toBe("accepted");
+    const kept = await bStorage.load();
+    expect(kept).not.toBeNull();
+    expect(kept!.lastReachedServer).toBe(day(30)().toISOString());
+  });
+
+  it("reaching the Server resets the count", async () => {
+    const { bStorage } = await deviceB(14);
+    expect(await VaultSession.checkDevice(bStorage, undefined, { now: day(10) })).toBe("accepted");
+    await stopServer();
+    // Day 20 is 20 days after setup but only 10 after the Server was last reached.
+    expect(await VaultSession.checkDevice(bStorage, undefined, { now: day(20) })).toBe("offline");
+    expect(await bStorage.load()).not.toBeNull();
+    expect(await VaultSession.checkDevice(bStorage, undefined, { now: day(25) })).toBe("offlineErased");
+    expect(await bStorage.load()).toBeNull();
+    await start();
+  });
+
+  it("no lastReachedServer (older vault) → counts from when it was turned on", async () => {
+    const { bStorage } = await deviceB(null);
+    const { lastReachedServer: _, ...old } = (await bStorage.load())!;
+    await bStorage.save(old);
+    const b = await VaultSession.unlock(bStorage, PASSWORD, undefined, { now: day(100) });
+    await b.setOfflineErase(14);
+    b.lock();
+    await stopServer();
+    expect(await VaultSession.checkDevice(bStorage, undefined, { now: day(110) })).toBe("offline");
+    expect(await VaultSession.checkDevice(bStorage, undefined, { now: day(115) })).toBe("offlineErased");
+    await start();
+  });
+
+  it("Disconnected (Master password changed elsewhere) past the limit → erased", async () => {
+    const { bStorage, a } = await deviceB(14);
+    await a.changePassword(PASSWORD, "a brand new master password");
+    expect(await VaultSession.checkDevice(bStorage, undefined, { now: day(15) })).toBe("offlineErased");
+    expect(await bStorage.load()).toBeNull();
+  });
+
+  it("Disconnected within the limit → kept, then erased once the limit passes", async () => {
+    const { bStorage, a } = await deviceB(14);
+    await a.changePassword(PASSWORD, "a brand new master password");
+    expect(await VaultSession.checkDevice(bStorage, undefined, { now: day(13) })).toBe("disconnected");
+    const kept = await bStorage.load();
+    expect(kept).not.toBeNull();
+    expect(kept!.token).toBeNull();
+    // Token already cleared: no Server contact, but the countdown still runs.
+    expect(await VaultSession.checkDevice(bStorage, undefined, { now: day(14) })).toBe("disconnected");
+    expect(await VaultSession.checkDevice(bStorage, undefined, { now: day(15) })).toBe("offlineErased");
+    expect(await bStorage.load()).toBeNull();
+  });
+
+  it("unlocked session past the limit while the Server is down → erased", async () => {
+    const { bStorage } = await deviceB(14);
+    let today = 13;
+    const b = await VaultSession.unlock(bStorage, PASSWORD, undefined, { now: () => day(today)() });
+    await stopServer();
+    await expect(b.sync()).rejects.toBeInstanceOf(NetworkError);
+    expect(await b.offlineEraseIfDue()).toBe(false);
+    expect(await bStorage.load()).not.toBeNull();
+    today = 15;
+    await expect(b.sync()).rejects.toBeInstanceOf(NetworkError);
+    expect(await b.offlineEraseIfDue()).toBe(true);
+    expect(b.locked).toBe(true);
+    expect(await bStorage.load()).toBeNull();
+    await start();
   });
 });

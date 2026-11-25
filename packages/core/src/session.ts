@@ -35,6 +35,36 @@ export interface LocalVault {
   pending: Record<string, PushChange>;
   /** ISO time this Device last reached the Server and was accepted. */
   lastReachedServer?: string;
+  /**
+   * Offline erase: erase this Device's vault after this many days without
+   * reaching the Server. Absent = Off. Per Device; never synced.
+   */
+  offlineEraseDays?: OfflineEraseDays;
+  /** ISO time Offline erase was turned on; the countdown never starts before it. */
+  offlineEraseSince?: string;
+}
+
+/** The choices offered for Offline erase. */
+export const OFFLINE_ERASE_DAYS = [7, 14, 30, 90] as const;
+export type OfflineEraseDays = (typeof OFFLINE_ERASE_DAYS)[number];
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * When Offline erase will erase this Device if the Server stays unreachable,
+ * or null when it is Off. Counts from the later of the last time the Server
+ * was reached and the time the setting was turned on, so a vault without a
+ * `lastReachedServer` (or one turned on long after) is never erased early.
+ * Needs no key: works on the stored vault while Locked.
+ */
+export function offlineEraseAt(vault: LocalVault): Date | null {
+  if (!vault.offlineEraseDays) return null;
+  const starts = [vault.lastReachedServer, vault.offlineEraseSince]
+    .filter((t): t is string => !!t)
+    .map((t) => Date.parse(t))
+    .filter((t) => !Number.isNaN(t));
+  if (starts.length === 0) return null;
+  return new Date(Math.max(...starts) + vault.offlineEraseDays * DAY_MS);
 }
 
 export interface VaultStorage {
@@ -84,6 +114,8 @@ export type DeviceCheck =
   | "signedOut"
   /** Server unreachable (or erroring): nothing changed. */
   | "offline"
+  /** Server unreachable and Offline erase's limit passed: this Device's vault has been erased. */
+  | "offlineErased"
   /** No vault stored on this Device. */
   | "noVault";
 
@@ -182,6 +214,11 @@ export class VaultSession {
       state.items = previous.items;
       state.pending = previous.pending;
       state.revision = previous.revision;
+      // Offline erase is a setting of this Device: keep it across sign-ins.
+      if (previous.offlineEraseDays) {
+        state.offlineEraseDays = previous.offlineEraseDays;
+        state.offlineEraseSince = previous.offlineEraseSince;
+      }
     }
     await opts.storage.save(state);
     const session = new VaultSession(state, vaultKey, opts.storage, opts.fetch, opts.now);
@@ -191,16 +228,20 @@ export class VaultSession {
 
   /**
    * Ask the Server whether this Device is still accepted. Needs no Master
-   * password, so it runs while Locked. Only a `signed_out` answer erases.
+   * password, so it runs while Locked. A `signed_out` answer erases; so does
+   * Offline erase once its limit has passed and the Server can't be reached
+   * or no longer accepts this Device (Disconnected doesn't count as reaching
+   * it) — an accepting Server always just resets the countdown.
    */
   static async checkDevice(
     storage: VaultStorage,
     fetchFn?: FetchFn,
     opts: { now?: Clock } = {},
   ): Promise<DeviceCheck> {
+    const now = opts.now ?? realClock;
     const state = await storage.load();
     if (!state) return "noVault";
-    if (!state.token) return "disconnected";
+    if (!state.token) return (await VaultSession.offlineErase(storage, state, now)) ?? "disconnected";
     try {
       await new ApiClient(state.serverUrl, state.token, fetchFn).status();
     } catch (e) {
@@ -211,16 +252,29 @@ export class VaultSession {
         }
         // Re-read so a write made meanwhile (e.g. an edit) is not lost.
         const latest = (await storage.load()) ?? state;
+        if ((await VaultSession.offlineErase(storage, latest, now)) !== null) return "offlineErased";
         if (latest.token === state.token) await storage.save({ ...latest, token: null });
         return "disconnected";
       }
-      return "offline";
+      return (await VaultSession.offlineErase(storage, state, now)) ?? "offline";
     }
     const latest = (await storage.load()) ?? state;
     if (latest.token === state.token) {
-      await storage.save({ ...latest, lastReachedServer: (opts.now ?? realClock)().toISOString() });
+      await storage.save({ ...latest, lastReachedServer: now().toISOString() });
     }
     return "accepted";
+  }
+
+  /** Erase storage if Offline erase's limit has passed; null if it hasn't. */
+  private static async offlineErase(
+    storage: VaultStorage,
+    state: LocalVault,
+    now: Clock,
+  ): Promise<"offlineErased" | null> {
+    const at = offlineEraseAt(state);
+    if (!at || now().getTime() <= at.getTime()) return null;
+    await storage.clear();
+    return "offlineErased";
   }
 
   /** Unlock the vault stored on this device. Works offline. */
@@ -302,6 +356,23 @@ export class VaultSession {
   get lastReachedServer() {
     return this.state.lastReachedServer;
   }
+  /** Offline erase limit in days, or null when Off (the default). */
+  get offlineEraseDays(): OfflineEraseDays | null {
+    return this.state.offlineEraseDays ?? null;
+  }
+
+  /** Turn Offline erase on (7/14/30/90 days) or Off (null) for this Device only. */
+  async setOfflineErase(days: OfflineEraseDays | null): Promise<void> {
+    if (days !== null && !OFFLINE_ERASE_DAYS.includes(days)) throw new Error(`Unsupported Offline erase limit: ${days}`);
+    if (days === null) {
+      delete this.state.offlineEraseDays;
+      delete this.state.offlineEraseSince;
+    } else {
+      this.state.offlineEraseDays = days;
+      this.state.offlineEraseSince = this.now().toISOString();
+    }
+    await this.persist();
+  }
 
   async devices() {
     const list = await this.reach(() => this.api.devices());
@@ -335,6 +406,20 @@ export class VaultSession {
       }
       throw e;
     }
+  }
+
+  /**
+   * Offline erase for an unlocked session: call after the Server couldn't be
+   * reached or no longer accepts this Device. Past the limit, erases this
+   * Device's vault and locks; returns whether it did. Accepted contact keeps
+   * `lastReachedServer` current, so a reachable Device is never past it.
+   */
+  async offlineEraseIfDue(): Promise<boolean> {
+    if (this.erasedFlag) return true;
+    const at = offlineEraseAt(this.state);
+    if (!at || this.now().getTime() <= at.getTime()) return false;
+    await this.erase();
+    return true;
   }
 
   private async erase(): Promise<void> {

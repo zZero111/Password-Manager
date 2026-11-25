@@ -8,7 +8,7 @@ export function App() {
     case "loading":
       return <div className="auth muted">Loading…</div>;
     case "signedOut":
-      return vault.erasedNotice ? <ErasedNotice vault={vault} /> : <Welcome vault={vault} />;
+      return vault.erasedNotice ? <ErasedNotice vault={vault} reason={vault.erasedNotice} /> : <Welcome vault={vault} />;
     case "locked":
       return <Unlock vault={vault} />;
     case "unlocked":

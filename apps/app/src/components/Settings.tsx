@@ -1,4 +1,4 @@
-import { type Device, type VaultItemData, WrongPasswordError, estimateStrength, importBitwardenJson } from "@pm/core";
+import { type Device, OFFLINE_ERASE_DAYS, type OfflineEraseDays, type VaultItemData, WrongPasswordError, estimateStrength, importBitwardenJson } from "@pm/core";
 import { type FormEvent, useEffect, useState } from "react";
 import { saveTextFile } from "../lib/files";
 import { updateSettings, useSettings } from "../lib/settings";
@@ -140,6 +140,7 @@ export function SettingsPage({ vault, onBack }: { vault: Vault; onBack: () => vo
             <input type="checkbox" checked={settings.lockOnHide} onChange={(e) => updateSettings({ lockOnHide: e.target.checked })} />
             <span>Lock when the app is minimised or sent to the background</span>
           </label>
+          <OfflineErase vault={vault} />
         </Section>
 
         <ChangePassword vault={vault} />
@@ -174,6 +175,37 @@ export function SettingsPage({ vault, onBack }: { vault: Vault; onBack: () => vo
         </Section>
       </div>
     </div>
+  );
+}
+
+/** Offline erase: a setting of this Device only, stored with its vault and never synced. */
+function OfflineErase({ vault }: { vault: Vault }) {
+  const days = vault.session?.offlineEraseDays ?? null;
+  const last = vault.session?.lastReachedServer;
+  const [error, setError] = useState<string | null>(null);
+  return (
+    <>
+      <Field label="Offline erase (this Device only)">
+        <select
+          value={days ?? 0}
+          onChange={(e) => {
+            const v = +e.target.value;
+            if (v && !confirm(`Erase this Device’s vault if it goes ${v} days without reaching the Server? Unsynced changes would be lost.`)) return;
+            setError(null);
+            vault.setOfflineErase(v ? (v as OfflineEraseDays) : null).catch((err) => setError(String(err)));
+          }}
+        >
+          <option value={0}>Off</option>
+          {OFFLINE_ERASE_DAYS.map((d) => (
+            <option key={d} value={d}>
+              After {d} days offline
+            </option>
+          ))}
+        </select>
+      </Field>
+      <p className="muted small">Last reached the Server: {last ? new Date(last).toLocaleString() : "never"}</p>
+      <ErrorText error={error} />
+    </>
   );
 }
 
