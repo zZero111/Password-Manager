@@ -1,0 +1,100 @@
+name: Android app
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+  # Check the Android build on PRs that touch the native app or this workflow.
+  pull_request:
+    paths:
+      - ".github/workflows/android.yml"
+      - "apps/app/src-tauri/**"
+
+# Signing: add these repository secrets (see README → "Android signing").
+#   ANDROID_KEYSTORE_BASE64   base64 of your release keystore (.jks)
+#   ANDROID_KEYSTORE_PASSWORD keystore password
+#   ANDROID_KEY_ALIAS         key alias inside the keystore
+#   ANDROID_KEY_PASSWORD      key password
+# Without them the APK is signed with a throwaway test key: it installs, but a later
+# build can't update it (Android requires the same key), so you'd have to uninstall first.
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: apps/app/src-tauri -> target
+      - run: pnpm install --frozen-lockfile
+
+      - name: Generate the Android project
+        working-directory: apps/app
+        # The runner image provides the NDK path as a shell variable.
+        run: NDK_HOME="$ANDROID_NDK_LATEST_HOME" pnpm tauri android init --ci
+
+      - name: Build release APK (unsigned)
+        working-directory: apps/app
+        # The runner image provides the NDK path as a shell variable.
+        run: NDK_HOME="$ANDROID_NDK_LATEST_HOME" pnpm tauri android build --apk --ci --target aarch64 --target armv7
+
+      - name: Sign APK
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          BT="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)"
+          UNSIGNED=$(find apps/app/src-tauri/gen/android -name '*-release-unsigned.apk' | head -1)
+          test -n "$UNSIGNED" || { echo "No unsigned APK found"; exit 1; }
+          if [ -n "${KEYSTORE_B64:-}" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            SUFFIX=""
+          else
+            echo "::warning::No ANDROID_KEYSTORE_* secrets: signing with a throwaway test key. This APK can't be updated in place by later builds."
+            KS_PASS=$(openssl rand -hex 16); KEY_PASS=$KS_PASS; KEY_ALIAS=test
+            keytool -genkeypair -keystore "$RUNNER_TEMP/release.jks" -storepass "$KS_PASS" -keypass "$KEY_PASS" \
+              -alias "$KEY_ALIAS" -keyalg RSA -keysize 3072 -validity 365 -dname "CN=Keyhold test build" >/dev/null
+            SUFFIX="_test-signed"
+          fi
+          VERSION=$(node -p "require('./apps/app/src-tauri/tauri.conf.json').version")
+          OUT="Keyhold_${VERSION}_android${SUFFIX}.apk"
+          "$BT/zipalign" -p -f 4 "$UNSIGNED" "$RUNNER_TEMP/aligned.apk"
+          "$BT/apksigner" sign --ks "$RUNNER_TEMP/release.jks" --ks-key-alias "$KEY_ALIAS" \
+            --ks-pass env:KS_PASS --key-pass env:KEY_PASS --out "$OUT" "$RUNNER_TEMP/aligned.apk"
+          "$BT/apksigner" verify "$OUT"
+          rm -f "$RUNNER_TEMP/release.jks"
+          echo "APK=$OUT" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: keyhold-android
+          path: ${{ env.APK }}
+          if-no-files-found: error
+
+      # On a version tag, attach the APK to the draft release the desktop workflow creates.
+      - name: Attach to release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for i in $(seq 1 60); do
+            if gh release upload "$GITHUB_REF_NAME" "$APK" --clobber --repo "$GITHUB_REPOSITORY"; then exit 0; fi
+            echo "Release $GITHUB_REF_NAME not created yet; waiting…"; sleep 30
+          done
+          echo "::error::No release for $GITHUB_REF_NAME after 30 minutes"; exit 1
