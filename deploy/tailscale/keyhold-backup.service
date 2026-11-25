@@ -1,0 +1,9 @@
+[Unit]
+Description=Back up the Keyhold database
+Wants=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+# Change this path if you cloned the repository somewhere else.
+ExecStart=/opt/password-manager/deploy/tailscale/backup.sh

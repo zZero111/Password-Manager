@@ -19,8 +19,12 @@ A self-hosted, end-to-end encrypted password manager — a replacement for Bitwa
 | `apps/server`   | Sync server (Node 22 + Fastify + SQLite). Stores only encrypted blobs.              |
 | `apps/app`      | The app: React UI + Tauri shell (`src-tauri/`) for desktop and mobile               |
 | `deploy`        | Docker Compose with Caddy for automatic HTTPS, and a backup script                  |
+| `deploy/tailscale` | Home-box setup: Tailscale for HTTPS, nightly backups to a second disk           |
 
 ## 1. Run the sync server
+
+> Running it on a home machine that is already on your Tailscale network? Use
+> [deploy/tailscale](deploy/tailscale/README.md) instead — no domain or open ports needed.
 
 You need a machine reachable from all your devices (a small VPS, a home server, a NAS…) and a domain name.
 
