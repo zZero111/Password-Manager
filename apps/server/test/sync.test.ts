@@ -794,3 +794,156 @@ describe("account deletion", () => {
     expect((await again.list()).items).toEqual([]);
   });
 });
+
+describe("move", () => {
+  async function startSecond(signups: "open" | "closed" = "open") {
+    const path = join(mkdtempSync(join(tmpdir(), "pm-")), "vault.db");
+    const server = await buildServer({ dbPath: path, signups, maxLoginFailures: 5 });
+    await server.listen({ port: 0, host: "127.0.0.1" });
+    const addr = server.server.address();
+    if (!addr || typeof addr === "string") throw new Error("no address");
+    return { server, url: `http://127.0.0.1:${addr.port}` };
+  }
+  const loginAt = (serverUrl: string, password = PASSWORD) =>
+    VaultSession.login({ serverUrl, email: "alice@example.com", password, deviceName: "Fresh", storage: new MemoryStorage() });
+  const names = (list: { name: string }[]) => list.map((i) => i.name).sort();
+
+  it("a fresh Device signs in to the new Server and sees every Item, including the Trash", async () => {
+    const second = await startSecond();
+    try {
+      const { session: a, storage } = await registerAlice();
+      await a.save(login_("Live"));
+      const trashed = await a.save(login_("Binned"));
+      const purged = await a.save(login_("Purged"));
+      await a.sync();
+      await a.delete(trashed.id);
+      await a.purge(purged.id);
+      await a.sync();
+
+      const res = await a.moveTo({ serverUrl: second.url, masterPassword: PASSWORD, deleteOld: false });
+      expect(res).toEqual({ uploaded: 2, oldAccountDeleted: false });
+      expect(a.serverUrl).toBe(second.url);
+      expect((await storage.load())!.serverUrl).toBe(second.url);
+
+      const fresh = await loginAt(second.url);
+      const list = await fresh.list();
+      expect(names(list.items)).toEqual(["Live"]);
+      expect(names(list.trash)).toEqual(["Binned"]);
+      expect(list.unreadable).toBe(0);
+
+      // The moved Device keeps syncing with the new Server, both ways.
+      await a.save(login_("After move"));
+      expect((await a.sync()).pushed).toBe(1);
+      await fresh.sync();
+      expect(names((await fresh.list()).items)).toEqual(["After move", "Live"]);
+      // The old Account was left alone.
+      expect(names((await (await login()).list()).items)).toEqual(["Live"]);
+    } finally {
+      await second.server.close();
+    }
+  });
+
+  it("pending local changes on the moving Device arrive on the new Server", async () => {
+    const second = await startSecond();
+    try {
+      const { session: a } = await registerAlice();
+      const synced = await a.save(login_("Synced"));
+      await a.sync();
+      await app.close(); // old Server goes away: edits stay pending
+      await a.save({ ...synced, name: "Edited offline" }, synced.id);
+      await a.save(login_("Created offline"));
+      await expect(a.sync()).rejects.toThrow();
+      expect(a.pendingCount).toBe(2);
+
+      const res = await a.moveTo({ serverUrl: second.url, masterPassword: PASSWORD, deleteOld: true });
+      expect(res.uploaded).toBe(2);
+      expect(res.oldAccountDeleted).toBe(false);
+      expect(res.oldAccountError).toBeTruthy();
+      expect(a.pendingCount).toBe(0);
+
+      const fresh = await loginAt(second.url);
+      expect(names((await fresh.list()).items)).toEqual(["Created offline", "Edited offline"]);
+      expect((await a.sync()).pulled).toBe(2);
+      await start(); // so afterEach has a Server to close
+    } finally {
+      await second.server.close();
+    }
+  });
+
+  it("uploads in batches the Server accepts", async () => {
+    const second = await startSecond();
+    try {
+      const { session: a } = await registerAlice();
+      await a.addMany(Array.from({ length: 501 }, (_, i) => login_(`Item ${i}`)));
+      const res = await a.moveTo({ serverUrl: second.url, masterPassword: PASSWORD, deleteOld: false });
+      expect(res.uploaded).toBe(501);
+      expect((await (await loginAt(second.url)).list()).items).toHaveLength(501);
+    } finally {
+      await second.server.close();
+    }
+  });
+
+  it("with the delete option, the Account is gone from the old Server", async () => {
+    const second = await startSecond();
+    try {
+      const { session: a } = await registerAlice();
+      await a.save(login_("Moved"));
+      await a.sync();
+      const res = await a.moveTo({ serverUrl: second.url, masterPassword: PASSWORD, deleteOld: true });
+      expect(res).toEqual({ uploaded: 1, oldAccountDeleted: true });
+      await expect(login()).rejects.toThrow(/Incorrect/);
+      expect(names((await (await loginAt(second.url)).list()).items)).toEqual(["Moved"]);
+    } finally {
+      await second.server.close();
+    }
+  });
+
+  it("with the old Server down, the Move succeeds and reports the skipped deletion", async () => {
+    const second = await startSecond();
+    try {
+      const { session: a } = await registerAlice();
+      await a.save(login_("Moved"));
+      await a.sync();
+      await app.close();
+      const res = await a.moveTo({ serverUrl: second.url, masterPassword: PASSWORD, deleteOld: true });
+      expect(res.uploaded).toBe(1);
+      expect(res.oldAccountDeleted).toBe(false);
+      expect(res.oldAccountError).toMatch(/\S/);
+      expect(a.serverUrl).toBe(second.url);
+      await a.sync();
+      await start();
+    } finally {
+      await second.server.close();
+    }
+  });
+
+  it("a wrong Master password, closed sign-ups or an existing email fail without changing this Device", async () => {
+    const closed = await startSecond("closed");
+    const taken = await startSecond();
+    try {
+      const { session: a, storage } = await registerAlice();
+      await a.save(login_("Stays"));
+      await a.sync();
+      await a.save(login_("Pending"));
+      const before = structuredClone(await storage.load());
+
+      await expect(a.moveTo({ serverUrl: taken.url, masterPassword: "wrong", deleteOld: true })).rejects.toThrow(/Incorrect/i);
+      await expect(a.moveTo({ serverUrl: closed.url, masterPassword: PASSWORD, deleteOld: true })).rejects.toThrow(/closed/i);
+      await VaultSession.register({
+        serverUrl: taken.url, email: "alice@example.com", password: "someone else's", deviceName: "X", storage: new MemoryStorage(), kdf,
+      });
+      await expect(a.moveTo({ serverUrl: taken.url, masterPassword: PASSWORD, deleteOld: true })).rejects.toThrow(/already exists/);
+      await expect(
+        a.moveTo({ serverUrl: "http://127.0.0.1:1", masterPassword: PASSWORD, deleteOld: true }),
+      ).rejects.toThrow();
+
+      expect(await storage.load()).toEqual(before);
+      expect(a.serverUrl).toBe(url);
+      expect((await a.sync()).pushed).toBe(1);
+      expect(names((await (await login()).list()).items)).toEqual(["Pending", "Stays"]);
+    } finally {
+      await closed.server.close();
+      await taken.server.close();
+    }
+  });
+});
