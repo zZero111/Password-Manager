@@ -185,3 +185,24 @@ export function Unlock({ vault }: { vault: Vault }) {
     </div>
   );
 }
+
+/** Full-screen notice after a Sign out from another Device erased this Device's vault. */
+export function ErasedNotice({ vault }: { vault: Vault }) {
+  return (
+    <div className="auth" role="alertdialog" aria-labelledby="erased-title">
+      <div className="auth-card">
+        <Brand />
+        <h2 id="erased-title" className="center">
+          This Device was signed out and its vault erased
+        </h2>
+        <p className="muted center">
+          It was signed out from another Device. Its copy of the vault has been removed. Sign in again to use your vault
+          here.
+        </p>
+        <button type="button" className="btn primary wide" autoFocus onClick={vault.dismissErasedNotice}>
+          Continue
+        </button>
+      </div>
+    </div>
+  );
+}

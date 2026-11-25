@@ -1,4 +1,4 @@
-import { Unlock, Welcome } from "./components/Auth";
+import { ErasedNotice, Unlock, Welcome } from "./components/Auth";
 import { VaultScreen } from "./components/VaultScreen";
 import { useVault } from "./lib/useVault";
 
@@ -8,7 +8,7 @@ export function App() {
     case "loading":
       return <div className="auth muted">Loading…</div>;
     case "signedOut":
-      return <Welcome vault={vault} />;
+      return vault.erasedNotice ? <ErasedNotice vault={vault} /> : <Welcome vault={vault} />;
     case "locked":
       return <Unlock vault={vault} />;
     case "unlocked":

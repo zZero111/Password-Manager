@@ -1,5 +1,6 @@
 import {
   type AccountOptions,
+  DeviceErasedError,
   DisconnectedError,
   NetworkError,
   type VaultItem,
@@ -20,6 +21,8 @@ export interface SyncStatus {
 }
 
 const SYNC_INTERVAL_MS = 60_000;
+/** How often a Locked Device asks the Server whether it is still accepted. */
+const CHECK_INTERVAL_MS = 3 * 60_000;
 
 export function useVault() {
   const [phase, setPhase] = useState<Phase>("loading");
@@ -28,11 +31,31 @@ export function useVault() {
   const [trash, setTrash] = useState<VaultItem[]>([]);
   const [unreadable, setUnreadable] = useState(0);
   const [lockedEmail, setLockedEmail] = useState("");
+  /** Set when a Sign out from another Device erased this Device's vault. */
+  const [erasedNotice, setErasedNotice] = useState(false);
   const [sync, setSync] = useState<SyncStatus>({ state: "idle", lastSyncAt: null, pending: 0 });
   const sessionRef = useRef<VaultSession | null>(null);
   sessionRef.current = session;
 
-  // Initial state: is there a vault on this device?
+  /** This Device was Signed out elsewhere and its vault is gone: drop everything in memory. */
+  const onErased = useCallback(() => {
+    sessionRef.current?.lock();
+    sessionRef.current = null;
+    setSession(null);
+    setItems([]);
+    setTrash([]);
+    setErasedNotice(true);
+    setPhase("signedOut");
+  }, []);
+
+  /** Check device: needs no Master password, so it runs while Locked. */
+  const checkDevice = useCallback(async () => {
+    if (sessionRef.current) return; // unlocked: the session's own Server calls do this
+    const outcome = await VaultSession.checkDevice(idbStorage).catch(() => "offline" as const);
+    if (outcome === "signedOut" && !sessionRef.current) onErased();
+  }, [onErased]);
+
+  // Initial state: is there a vault on this device? Then check device right away.
   useEffect(() => {
     idbStorage
       .load()
@@ -40,10 +63,23 @@ export function useVault() {
         if (v) {
           setLockedEmail(v.email);
           setPhase("locked");
+          void checkDevice();
         } else setPhase("signedOut");
       })
       .catch(() => setPhase("signedOut"));
-  }, []);
+  }, [checkDevice]);
+
+  // Every few minutes while Locked (unlocked Devices sync every minute instead).
+  useEffect(() => {
+    if (phase !== "locked") return;
+    const id = setInterval(() => void checkDevice(), CHECK_INTERVAL_MS);
+    const online = () => void checkDevice();
+    window.addEventListener("online", online);
+    return () => {
+      clearInterval(id);
+      window.removeEventListener("online", online);
+    };
+  }, [phase, checkDevice]);
 
   const refresh = useCallback(async (s = sessionRef.current) => {
     if (!s || s.locked) return;
@@ -66,18 +102,33 @@ export function useVault() {
         await s.sync();
         setSync({ state: "idle", lastSyncAt: Date.now(), pending: s.pendingCount });
       } catch (e) {
+        if (e instanceof DeviceErasedError) return onErased();
         const state = e instanceof DisconnectedError ? "disconnected" : e instanceof NetworkError ? "offline" : "error";
         setSync((st) => ({ ...st, state, message: (e as Error).message, pending: s.pendingCount }));
       }
       await refresh(s);
     },
-    [refresh],
+    [refresh, onErased],
+  );
+
+  /** Run a Server call from an unlocked session; a Sign out from elsewhere erases and shows the notice. */
+  const guard = useCallback(
+    async <T,>(call: (s: VaultSession) => Promise<T>): Promise<T> => {
+      try {
+        return await call(sessionRef.current!);
+      } catch (e) {
+        if (e instanceof DeviceErasedError) onErased();
+        throw e;
+      }
+    },
+    [onErased],
   );
 
   const enter = useCallback(
     async (s: VaultSession) => {
       setSession(s);
       sessionRef.current = s;
+      setErasedNotice(false);
       setLockedEmail(s.email);
       setPhase("unlocked");
       await refresh(s);
@@ -146,6 +197,8 @@ export function useVault() {
     unreadable,
     sync,
     lockedEmail,
+    erasedNotice,
+    dismissErasedNotice: () => setErasedNotice(false),
     serverUrl: session?.serverUrl ?? "",
     session,
 
@@ -196,8 +249,10 @@ export function useVault() {
       await runSync(s);
     },
     async changePassword(current: string, next: string) {
-      await sessionRef.current!.changePassword(current, next);
+      await guard((s) => s.changePassword(current, next));
     },
+    devices: () => guard((s) => s.devices()),
+    revokeDevice: (id: string) => guard((s) => s.revokeDevice(id)),
   };
 }
 

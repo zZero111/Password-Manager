@@ -209,6 +209,11 @@ export async function buildServer(opts: ServerOptions): Promise<FastifyInstance>
     },
   );
 
+  // Cheap "is this Device still accepted?" check; needs no Master password. 401 carries the reason.
+  app.get("/api/accounts/status", { preHandler: authenticate }, async (_req, reply) => {
+    reply.status(204);
+  });
+
   app.post("/api/accounts/logout", { preHandler: authenticate }, async (req, reply) => {
     removeSession(req.auth.sessionId, req.auth.userId, "signed_out");
     reply.status(204);

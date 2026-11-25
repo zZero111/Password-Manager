@@ -33,6 +33,8 @@ export interface LocalVault {
   items: Record<string, ServerItem>;
   /** Local edits not yet accepted by the server (encrypted). */
   pending: Record<string, PushChange>;
+  /** ISO time this Device last reached the Server and was accepted. */
+  lastReachedServer?: string;
 }
 
 export interface VaultStorage {
@@ -60,6 +62,30 @@ export class VaultLockedError extends Error {
     this.name = "VaultLockedError";
   }
 }
+
+/**
+ * This Device was Signed out from another Device: its copy of the vault has
+ * been erased and the session locked. Never thrown for a Disconnected Device.
+ */
+export class DeviceErasedError extends Error {
+  constructor() {
+    super("This Device was signed out and its vault erased");
+    this.name = "DeviceErasedError";
+  }
+}
+
+/** What `VaultSession.checkDevice` found out. */
+export type DeviceCheck =
+  /** The Server still accepts this Device; `lastReachedServer` was recorded. */
+  | "accepted"
+  /** Not accepted (e.g. Master password changed elsewhere); vault and pending changes kept, token cleared. */
+  | "disconnected"
+  /** Signed out from another Device: this Device's vault has been erased. */
+  | "signedOut"
+  /** Server unreachable (or erroring): nothing changed. */
+  | "offline"
+  /** No vault stored on this Device. */
+  | "noVault";
 
 interface Tombstone {
   tombstone: true;
@@ -99,6 +125,7 @@ export class VaultSession {
   private cache = new Map<string, Payload>();
   private inFlight: Promise<SyncResult> | null = null;
   private readonly api: ApiClient;
+  private erasedFlag = false;
 
   private constructor(
     private state: LocalVault,
@@ -162,6 +189,40 @@ export class VaultSession {
     return session;
   }
 
+  /**
+   * Ask the Server whether this Device is still accepted. Needs no Master
+   * password, so it runs while Locked. Only a `signed_out` answer erases.
+   */
+  static async checkDevice(
+    storage: VaultStorage,
+    fetchFn?: FetchFn,
+    opts: { now?: Clock } = {},
+  ): Promise<DeviceCheck> {
+    const state = await storage.load();
+    if (!state) return "noVault";
+    if (!state.token) return "disconnected";
+    try {
+      await new ApiClient(state.serverUrl, state.token, fetchFn).status();
+    } catch (e) {
+      if (e instanceof DisconnectedError) {
+        if (e.reason === "signed_out") {
+          await storage.clear();
+          return "signedOut";
+        }
+        // Re-read so a write made meanwhile (e.g. an edit) is not lost.
+        const latest = (await storage.load()) ?? state;
+        if (latest.token === state.token) await storage.save({ ...latest, token: null });
+        return "disconnected";
+      }
+      return "offline";
+    }
+    const latest = (await storage.load()) ?? state;
+    if (latest.token === state.token) {
+      await storage.save({ ...latest, lastReachedServer: (opts.now ?? realClock)().toISOString() });
+    }
+    return "accepted";
+  }
+
   /** Unlock the vault stored on this device. Works offline. */
   static async unlock(
     storage: VaultStorage,
@@ -187,6 +248,7 @@ export class VaultSession {
     this.vaultKey = await unwrapVaultKey(kek, res.protectedKey);
     Object.assign(this.state, { token: res.token, salt: res.salt, kdf: res.kdf, protectedKey: res.protectedKey });
     this.api.token = res.token;
+    this.state.lastReachedServer = this.now().toISOString();
     await this.persist();
   }
 
@@ -195,7 +257,9 @@ export class VaultSession {
     const salt = newSalt();
     const next = await deriveMasterKeys(newPassword, salt, kdf);
     const protectedKey = await rewrapVaultKey(current.kek, next.kek, this.state.protectedKey);
-    await this.api.changePassword({ currentAuthKey: current.authKey, authKey: next.authKey, salt, kdf, protectedKey });
+    await this.reach(() =>
+      this.api.changePassword({ currentAuthKey: current.authKey, authKey: next.authKey, salt, kdf, protectedKey }),
+    );
     Object.assign(this.state, { salt, kdf, protectedKey });
     await this.persist();
   }
@@ -231,12 +295,54 @@ export class VaultSession {
   get pendingCount() {
     return Object.keys(this.state.pending).length;
   }
-
-  devices() {
-    return this.api.devices();
+  /** True once a `signed_out` answer erased this Device's vault. */
+  get erased() {
+    return this.erasedFlag;
   }
-  revokeDevice(id: string) {
-    return this.api.revokeDevice(id);
+  get lastReachedServer() {
+    return this.state.lastReachedServer;
+  }
+
+  async devices() {
+    const list = await this.reach(() => this.api.devices());
+    await this.persist();
+    return list;
+  }
+  async revokeDevice(id: string) {
+    await this.reach(() => this.api.revokeDevice(id));
+    await this.persist();
+  }
+
+  /**
+   * Every authenticated Server call goes through here. Success records when
+   * the Server was last reached; `signed_out` erases this Device and locks;
+   * any other rejection leaves it Disconnected (vault kept).
+   */
+  private async reach<T>(call: () => Promise<T>): Promise<T> {
+    if (this.erasedFlag) throw new DeviceErasedError();
+    try {
+      const res = await call();
+      this.state.lastReachedServer = this.now().toISOString();
+      return res;
+    } catch (e) {
+      if (e instanceof DisconnectedError) {
+        this.state.token = null;
+        this.api.token = null;
+        if (e.reason === "signed_out") {
+          await this.erase();
+          throw new DeviceErasedError();
+        }
+      }
+      throw e;
+    }
+  }
+
+  private async erase(): Promise<void> {
+    this.erasedFlag = true;
+    this.lock();
+    this.state.items = {};
+    this.state.pending = {};
+    await this.storage.clear();
   }
 
   // ── Items ──────────────────────────────────────────────────────────
@@ -366,7 +472,7 @@ export class VaultSession {
   private async doSync(): Promise<SyncResult> {
     const result: SyncResult = { pulled: 0, pushed: 0, conflicts: 0, purged: 0 };
     try {
-      const pulled = await this.api.sync(this.state.revision);
+      const pulled = await this.reach(() => this.api.sync(this.state.revision));
       for (const si of pulled.items) {
         if (await this.mergeRemote(si)) result.conflicts++;
         result.pulled++;
@@ -387,10 +493,6 @@ export class VaultSession {
       await this.persist();
       return result;
     } catch (e) {
-      if (e instanceof DisconnectedError) {
-        this.state.token = null;
-        this.api.token = null;
-      }
       await this.persist();
       throw e;
     }
@@ -400,7 +502,7 @@ export class VaultSession {
     for (let attempt = 0; attempt < 3; attempt++) {
       const sent = Object.values(this.state.pending);
       if (sent.length === 0) break;
-      const res = await this.api.push(sent);
+      const res = await this.reach(() => this.api.push(sent));
       const byId = new Map(sent.map((c) => [c.id, c]));
       for (const { id, revision } of res.applied) {
         const change = byId.get(id)!;
@@ -454,7 +556,8 @@ export class VaultSession {
     return true;
   }
 
-  private persist() {
-    return this.storage.save(this.state);
+  private async persist() {
+    // Never write back a vault that a Sign out erased.
+    if (!this.erasedFlag) await this.storage.save(this.state);
   }
 }

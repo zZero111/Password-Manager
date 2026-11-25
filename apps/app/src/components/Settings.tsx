@@ -233,8 +233,8 @@ function Devices({ vault }: { vault: Vault }) {
   const [error, setError] = useState<string | null>(null);
 
   const load = () =>
-    vault.session
-      ?.devices()
+    vault
+      .devices()
       .then(setDevices)
       .catch((e: Error) => setError(e.message));
 
@@ -245,6 +245,10 @@ function Devices({ vault }: { vault: Vault }) {
 
   return (
     <Section title="Signed-in devices">
+      <p className="muted small">
+        Signing out another Device erases its vault the next time it goes online, even while it’s Locked. Until then it
+        keeps its encrypted copy.
+      </p>
       <ErrorText error={error} />
       {devices?.map((d) => (
         <div className="device" key={d.id}>
@@ -257,8 +261,13 @@ function Devices({ vault }: { vault: Vault }) {
               type="button"
               className="btn small"
               onClick={async () => {
-                if (!confirm(`Sign out “${d.name}”?`)) return;
-                await vault.session?.revokeDevice(d.id);
+                if (
+                  !confirm(
+                    `Sign out “${d.name}”? Its vault will be erased the next time it goes online; until then it keeps its encrypted copy.`,
+                  )
+                )
+                  return;
+                await vault.revokeDevice(d.id);
                 await load();
               }}
             >

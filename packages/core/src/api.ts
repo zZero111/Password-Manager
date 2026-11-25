@@ -105,6 +105,10 @@ export class ApiClient {
   login(req: LoginRequest) {
     return this.request<LoginResponse>("POST", "/api/accounts/login", req, false);
   }
+  /** Resolves if the Server still accepts this Device; throws DisconnectedError (with reason) if not. */
+  status() {
+    return this.request<void>("GET", "/api/accounts/status");
+  }
   logout() {
     return this.request<void>("POST", "/api/accounts/logout", {});
   }

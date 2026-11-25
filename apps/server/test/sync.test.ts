@@ -6,6 +6,7 @@ import type { FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   ApiError,
+  DeviceErasedError,
   DisconnectedError,
   type KdfParams,
   MIN_KDF,
@@ -447,12 +448,7 @@ describe("devices", () => {
     expect(devices.map((d) => d.name).sort()).toEqual(["Device A", "Device B"]);
     expect(devices.find((d) => d.current)?.name).toBe("Device A");
     await a.revokeDevice(devices.find((d) => !d.current)!.id);
-    const err = await b.sync().catch((e: unknown) => e);
-    // Removed from another Device: reported as signed_out, but for now B is only Disconnected.
-    expect(err).toBeInstanceOf(DisconnectedError);
-    expect((err as DisconnectedError).reason).toBe("signed_out");
-    expect(b.signedIn).toBe(false);
-    await b.logout();
+    expect((await a.devices()).map((d) => d.name)).toEqual(["Device A"]);
   });
 
   it("rejects requests without a valid token", async () => {
@@ -518,5 +514,90 @@ describe("devices", () => {
       body: JSON.stringify({ changes: [{ id: crypto.randomUUID(), data: "plaintext!", deleted: false, baseRevision: 0 }] }),
     });
     expect(res.status).toBe(400);
+  });
+});
+
+describe("check device", () => {
+  const signOutB = async (a: VaultSession) => {
+    const devices = await a.devices();
+    await a.revokeDevice(devices.find((d) => d.name === "Device B")!.id);
+  };
+
+  it("check device on Locked B after Sign out → B's storage empty", async () => {
+    const { session: a } = await registerAlice();
+    const bStorage = new MemoryStorage();
+    const b = await login(bStorage);
+    await b.save(login_("Unsynced on B"));
+    b.lock();
+    await signOutB(a);
+    // Only B's storage: no Master password, no unlocked session.
+    expect(await VaultSession.checkDevice(bStorage)).toBe("signedOut");
+    expect(await bStorage.load()).toBeNull();
+    expect(await VaultSession.checkDevice(bStorage)).toBe("noVault");
+  });
+
+  it("Master password change → B Disconnected, not erased", async () => {
+    const { session: a } = await registerAlice();
+    const bStorage = new MemoryStorage();
+    const b = await login(bStorage);
+    const item = await b.save(login_("Pending on B"));
+    b.lock();
+    await a.changePassword(PASSWORD, "a brand new master password");
+    expect(await VaultSession.checkDevice(bStorage)).toBe("disconnected");
+    const kept = await bStorage.load();
+    expect(kept).not.toBeNull();
+    expect(kept!.token).toBeNull();
+    expect(Object.keys(kept!.pending)).toEqual([item.id]);
+    // Still unlocks offline with the password it was stored under; the edit is there.
+    const again = await VaultSession.unlock(bStorage, PASSWORD);
+    expect((await again.get(item.id))?.name).toBe("Pending on B");
+    expect(await VaultSession.checkDevice(bStorage)).toBe("disconnected");
+  });
+
+  it("check device while offline → unchanged", async () => {
+    const { session: a } = await registerAlice();
+    const bStorage = new MemoryStorage();
+    await login(bStorage);
+    await signOutB(a);
+    const before = await bStorage.load();
+    await app.close();
+    expect(await VaultSession.checkDevice(bStorage)).toBe("offline");
+    expect(await bStorage.load()).toEqual(before);
+    await start(); // afterEach closes it again
+  });
+
+  it("accepted contact records lastReachedServer", async () => {
+    await registerAlice();
+    const bStorage = new MemoryStorage();
+    const b = await login(bStorage);
+    const t1 = new Date("2030-01-02T03:04:05.000Z");
+    expect(await VaultSession.checkDevice(bStorage, undefined, { now: () => t1 })).toBe("accepted");
+    expect((await bStorage.load())!.lastReachedServer).toBe(t1.toISOString());
+    expect((await bStorage.load())!.token).not.toBeNull();
+
+    // An unlocked session records it after every successful Server call too.
+    const t2 = new Date("2030-02-03T04:05:06.000Z");
+    const unlocked = await VaultSession.unlock(bStorage, PASSWORD, undefined, { now: () => t2 });
+    await unlocked.sync();
+    expect(unlocked.lastReachedServer).toBe(t2.toISOString());
+    expect((await bStorage.load())!.lastReachedServer).toBe(t2.toISOString());
+    b.lock();
+  });
+
+  it("unlocked B receiving signed_out during sync → erased + locked", async () => {
+    const { session: a } = await registerAlice();
+    const bStorage = new MemoryStorage();
+    const b = await login(bStorage);
+    await b.save(login_("Unsynced on B"));
+    await signOutB(a);
+    await expect(b.sync()).rejects.toBeInstanceOf(DeviceErasedError);
+    expect(b.erased).toBe(true);
+    expect(b.locked).toBe(true);
+    expect(b.signedIn).toBe(false);
+    expect(await bStorage.load()).toBeNull();
+    // Nothing writes the vault back afterwards.
+    await expect(b.save(login_("after"))).rejects.toThrow();
+    await expect(b.devices()).rejects.toBeInstanceOf(DeviceErasedError);
+    expect(await bStorage.load()).toBeNull();
   });
 });
