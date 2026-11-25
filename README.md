@@ -85,6 +85,33 @@ pnpm tauri android build --apk
 Sign the APK before installing it (Tauri docs: *Distribute → Google Play → Signing*). For a quick try on your own
 phone, `pnpm tauri android dev` runs it over USB.
 
+Or let GitHub Actions build it: the **Android app** workflow (`.github/workflows/android.yml`) runs on `v*` tags (and
+attaches the APK to that tag's draft release), on manual runs, and on PRs that touch `apps/app/src-tauri`. Download the
+signed APK from the run's **Artifacts**.
+
+#### Android signing
+
+Android only installs signed APKs, and an update must be signed with the **same key** as the installed app — lose the
+key and you can't update; installs signed differently must be uninstalled first, which erases that Device's vault.
+Create a release key once and keep an offline backup of the `.jks` file and its passwords (not only inside Keyhold — you'd
+need the key to rebuild the app that opens it):
+
+```bash
+keytool -genkeypair -v -keystore keyhold-release.jks -alias keyhold -keyalg RSA -keysize 4096 -validity 10000
+```
+
+Then add four repository secrets (**Settings → Secrets and variables → Actions**):
+
+| Secret                      | Value                                         |
+| --------------------------- | --------------------------------------------- |
+| `ANDROID_KEYSTORE_BASE64`   | output of `base64 -w0 keyhold-release.jks`    |
+| `ANDROID_KEYSTORE_PASSWORD` | the keystore password you chose               |
+| `ANDROID_KEY_ALIAS`         | `keyhold`                                     |
+| `ANDROID_KEY_PASSWORD`      | the key password (same as the keystore's unless you set another) |
+
+Without these secrets the workflow still builds, but signs with a throwaway test key and names the file
+`…_test-signed.apk`.
+
 **iOS** (needs a Mac with Xcode and an Apple developer account for installing on a device):
 
 ```bash
