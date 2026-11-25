@@ -43,15 +43,13 @@ jobs:
 
       - name: Generate the Android project
         working-directory: apps/app
-        env:
-          NDK_HOME: ${{ env.ANDROID_NDK_LATEST_HOME }}
-        run: pnpm tauri android init --ci
+        # The runner image provides the NDK path as a shell variable.
+        run: NDK_HOME="$ANDROID_NDK_LATEST_HOME" pnpm tauri android init --ci
 
       - name: Build release APK (unsigned)
         working-directory: apps/app
-        env:
-          NDK_HOME: ${{ env.ANDROID_NDK_LATEST_HOME }}
-        run: pnpm tauri android build --apk --ci --target aarch64 --target armv7
+        # The runner image provides the NDK path as a shell variable.
+        run: NDK_HOME="$ANDROID_NDK_LATEST_HOME" pnpm tauri android build --apk --ci --target aarch64 --target armv7
 
       - name: Sign APK
         env:
