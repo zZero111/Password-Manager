@@ -109,7 +109,7 @@ describe("accounts", () => {
 });
 
 describe("sync", () => {
-  it("propagates creates, edits and deletes between devices", async () => {
+  it("propagates creates and edits between devices", async () => {
     const { session: a } = await registerAlice();
     const b = await login();
 
@@ -124,12 +124,117 @@ describe("sync", () => {
     const edited = await a.get(gh.id);
     expect(edited?.login?.password).toBe("s3cret");
     expect(edited?.passwordHistory[0]?.password).toBe("hunter2");
+  });
 
-    await a.remove(gh.id);
+  it("Delete on A → in B's Trash → Restore → back on both", async () => {
+    const { session: a } = await registerAlice();
+    const b = await login();
+    const gh = await a.save({ ...login_("GitHub"), folder: "Work", fields: [{ name: "PIN", value: "1234", hidden: true }] });
     await a.sync();
     await b.sync();
-    expect(await b.get(gh.id)).toBeUndefined();
-    expect((await b.list()).items).toHaveLength(0);
+
+    await a.delete(gh.id);
+    await a.sync();
+    await b.sync();
+    const onB = await b.list();
+    expect(onB.items).toHaveLength(0);
+    expect(onB.trash.map((i) => i.name)).toEqual(["GitHub"]);
+    expect(onB.trash[0]?.folder).toBe("Work");
+    expect(onB.trash[0]?.fields).toEqual([{ name: "PIN", value: "1234", hidden: true }]);
+
+    await b.restore(gh.id);
+    await b.sync();
+    await a.sync();
+    for (const s of [a, b]) {
+      const { items, trash } = await s.list();
+      expect(trash).toHaveLength(0);
+      expect(items.map((i) => [i.name, i.folder, i.login?.password])).toEqual([["GitHub", "Work", "hunter2"]]);
+      expect(items[0]?.trashedAt).toBeUndefined();
+    }
+  });
+
+  it("Delete permanently and Empty Trash Purge on every Device", async () => {
+    const { session: a } = await registerAlice();
+    const b = await login();
+    const one = await a.save(login_("One"));
+    const two = await a.save(login_("Two"));
+    const three = await a.save(login_("Three"));
+    await a.sync();
+    await b.sync();
+
+    // Delete permanently (Purge one)
+    await a.delete(one.id);
+    await a.purge(one.id);
+    await a.sync();
+    await b.sync();
+    expect(await b.get(one.id)).toBeUndefined();
+    expect((await b.list()).trash).toHaveLength(0);
+
+    // Empty Trash, from the other Device
+    await a.delete(two.id);
+    await a.delete(three.id);
+    await a.sync();
+    await b.sync();
+    expect((await b.list()).trash).toHaveLength(2);
+    expect(await b.emptyTrash()).toBe(2);
+    await b.sync();
+    await a.sync();
+    for (const s of [a, b]) expect(await s.list()).toEqual({ items: [], trash: [], unreadable: 0 });
+  });
+
+  it("Purged on day 31, still in Trash on day 29", async () => {
+    let t = Date.parse("2031-03-01T09:00:00Z");
+    const now = () => new Date(t);
+    const DAY = 24 * 60 * 60 * 1000;
+    const aStorage = new MemoryStorage();
+    const opts = { serverUrl: url, email: "alice@example.com", password: PASSWORD, now };
+    const a = await VaultSession.register({ ...opts, deviceName: "Device A", storage: aStorage, kdf });
+    const b = await VaultSession.login({ ...opts, deviceName: "Device B", storage: new MemoryStorage() });
+    const item = await a.save(login_("Old"));
+    await a.delete(item.id);
+    await a.sync();
+
+    t += 29 * DAY;
+    expect((await b.sync()).purged).toBe(0);
+    expect((await b.list()).trash.map((i) => i.name)).toEqual(["Old"]);
+
+    t += 2 * DAY; // day 31
+    expect((await b.sync()).purged).toBe(1);
+    expect(await b.get(item.id)).toBeUndefined();
+    // The Purge reached the other Device too (A unlocked fresh with the same clock).
+    const again = await VaultSession.unlock(aStorage, PASSWORD, undefined, { now });
+    await again.sync();
+    expect(await again.get(item.id)).toBeUndefined();
+    expect((await again.list()).trash).toHaveLength(0);
+  });
+
+  it("a Delete on one Device and an edit on another: most recent change wins", async () => {
+    const { session: a } = await registerAlice();
+    const b = await login();
+    const first = await a.save(login_("Edited last"));
+    const second = await a.save(login_("Deleted last"));
+    await a.sync();
+    await b.sync();
+    const tick = () => new Promise((r) => setTimeout(r, 5));
+
+    // A Deletes, then B edits later: the edit wins and the Item stays live.
+    await a.delete(first.id);
+    await tick();
+    await b.save({ ...first, notes: "kept" }, first.id);
+    // B edits, then A Deletes later: the Delete wins and the Item is in the Trash.
+    await b.save({ ...second, notes: "lost" }, second.id);
+    await tick();
+    await a.delete(second.id);
+
+    await a.sync();
+    await b.sync();
+    await a.sync();
+    for (const s of [a, b]) {
+      const { items, trash } = await s.list();
+      expect(items.map((i) => [i.name, i.notes])).toEqual([["Edited last", "kept"]]);
+      expect(trash.map((i) => i.name)).toEqual(["Deleted last"]);
+      expect(s.pendingCount).toBe(0);
+    }
   });
 
   it("queues offline edits and resolves conflicts by most recent change", async () => {
@@ -182,9 +287,16 @@ describe("sync", () => {
 
 describe("zero-knowledge storage", () => {
   it("the server database never contains plaintext", async () => {
-    const { session: a } = await registerAlice();
+    const { session: a, storage } = await registerAlice();
     await a.save(login_("Super Secret Bank", "PLAINTEXT-PASSWORD-123"));
     await a.sync();
+    // A Trash Item whose trash date is distinctive enough to spot in a dump.
+    const trashDate = "2031-07-04T12:34:56.789Z";
+    const unlocked = await VaultSession.unlock(storage, PASSWORD, undefined, { now: () => new Date(trashDate) });
+    const gone = await unlocked.save(login_("Trashed"));
+    await unlocked.delete(gone.id);
+    expect((await unlocked.get(gone.id))?.trashedAt).toBe(trashDate);
+    await unlocked.sync();
     const db = new DatabaseSync(dbPath, { readOnly: true });
     const dump = JSON.stringify([
       db.prepare("SELECT * FROM items").all(),
@@ -195,6 +307,9 @@ describe("zero-knowledge storage", () => {
     expect(dump).not.toContain("PLAINTEXT-PASSWORD-123");
     expect(dump).not.toContain("Super Secret Bank");
     expect(dump).not.toContain(PASSWORD);
+    expect(dump).not.toContain("2031-07-04");
+    expect(dump).not.toContain(String(Date.parse(trashDate)));
+    expect(dump).not.toMatch(/trash/i);
   });
 
   it("detects a server that swaps ciphertexts between items", async () => {

@@ -2,11 +2,16 @@ import { type ItemType, type VaultItem, folders as folderList, matchesSearch, ne
 import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import type { Vault } from "../lib/useVault";
 import { Generator } from "./Generator";
-import { ItemEditor, ItemView, TYPE_META } from "./Item";
+import { ItemEditor, ItemView, TYPE_META, daysLeftLabel } from "./Item";
 import { SettingsPage } from "./Settings";
 import { ErrorText, Field, Icon, type IconName, IconButton, Modal, PasswordInput } from "./ui";
 
-type Filter = { kind: "all" } | { kind: "favorites" } | { kind: "type"; type: ItemType } | { kind: "folder"; folder: string };
+type Filter =
+  | { kind: "all" }
+  | { kind: "favorites" }
+  | { kind: "type"; type: ItemType }
+  | { kind: "folder"; folder: string }
+  | { kind: "trash" };
 type Page = "items" | "generator" | "settings";
 type Editing = null | { kind: "new"; type: ItemType } | { kind: "edit"; id: string };
 
@@ -29,9 +34,12 @@ export function VaultScreen({ vault }: { vault: Vault }) {
   const [reauth, setReauth] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
 
+  // The Trash is its own pool: Trash Items never reach the main list, search, Folders, Favourites or counts.
+  const inTrash = filter.kind === "trash";
+  const pool = inTrash ? vault.trash : vault.items;
   const allFolders = useMemo(() => folderList(vault.items), [vault.items]);
   const visible = useMemo(() => {
-    const filtered = vault.items.filter((i) => {
+    const filtered = pool.filter((i) => {
       switch (filter.kind) {
         case "favorites":
           return i.favorite;
@@ -44,9 +52,9 @@ export function VaultScreen({ vault }: { vault: Vault }) {
       }
     });
     return sortItems(filtered.filter((i) => matchesSearch(i, query)));
-  }, [vault.items, filter, query]);
+  }, [pool, filter, query]);
 
-  const selected = vault.items.find((i) => i.id === selectedId) ?? null;
+  const selected = pool.find((i) => i.id === selectedId) ?? null;
 
   // Keyboard shortcuts: Ctrl/Cmd+F search, Ctrl/Cmd+L lock.
   useEffect(() => {
@@ -129,9 +137,23 @@ export function VaultScreen({ vault }: { vault: Vault }) {
         onEdit={() => setEditing({ kind: "edit", id: selected.id })}
         onToggleFavorite={() => void vault.save({ ...selected, favorite: !selected.favorite }, selected.id)}
         onDelete={async () => {
-          await vault.remove(selected.id);
+          await vault.delete(selected.id);
           setSelectedId(null);
         }}
+        trash={
+          inTrash
+            ? {
+                onRestore: async () => {
+                  await vault.restore(selected.id);
+                  setSelectedId(null);
+                },
+                onPurge: async () => {
+                  await vault.purge(selected.id);
+                  setSelectedId(null);
+                },
+              }
+            : undefined
+        }
       />
     );
   }
@@ -168,6 +190,8 @@ export function VaultScreen({ vault }: { vault: Vault }) {
           )}
           {allFolders.length > 0 && <div className="nav-heading">Folders</div>}
           {allFolders.map((f) => nav("folder", f, { kind: "folder", folder: f }))}
+          <div className="nav-heading">Trash</div>
+          {nav("trash", "Trash", { kind: "trash" }, vault.trash.length)}
           <div className="nav-heading">Tools</div>
           <button type="button" className={`nav-item${page === "generator" ? " active" : ""}`} onClick={() => (setPage("generator"), setDrawer(false))}>
             <Icon name="dice" />
@@ -199,7 +223,7 @@ export function VaultScreen({ vault }: { vault: Vault }) {
           </button>
           <div className="search">
             <Icon name="search" size={16} />
-            <input ref={searchRef} type="search" placeholder="Search vault" value={query} onChange={(e) => setQuery(e.target.value)} />
+            <input ref={searchRef} type="search" placeholder={inTrash ? "Search Trash" : "Search vault"} value={query} onChange={(e) => setQuery(e.target.value)} />
           </div>
           <div className="new-wrap">
             <button type="button" className="btn primary icon-only" aria-label="New item" onClick={() => setNewMenu(!newMenu)}>
@@ -214,6 +238,7 @@ export function VaultScreen({ vault }: { vault: Vault }) {
                     onClick={() => {
                       setNewMenu(false);
                       setPage("items");
+                      if (inTrash) setFilter({ kind: "all" });
                       setSelectedId(null);
                       setEditing({ kind: "new", type: t });
                     }}
@@ -238,6 +263,24 @@ export function VaultScreen({ vault }: { vault: Vault }) {
           </div>
         )}
 
+        {inTrash && vault.trash.length > 0 && (
+          <div className="trash-bar muted small">
+            <span>Items in the Trash are deleted permanently after 30 days.</span>
+            <button
+              type="button"
+              className="btn danger small"
+              onClick={async () => {
+                const n = vault.trash.length;
+                if (!confirm(`Permanently delete all ${n} ${n === 1 ? "item" : "items"} in the Trash on all your devices? This can’t be undone.`)) return;
+                await vault.emptyTrash();
+                setSelectedId(null);
+              }}
+            >
+              Empty Trash
+            </button>
+          </div>
+        )}
+
         <ul className="item-list">
           {visible.map((i) => (
             <li key={i.id}>
@@ -258,14 +301,16 @@ export function VaultScreen({ vault }: { vault: Vault }) {
                     {i.name}
                     {i.favorite && <span className="fav-dot" aria-label="favourite">★</span>}
                   </span>
-                  <span className="item-sub muted">{subtitle(i)}</span>
+                  <span className="item-sub muted">{inTrash ? daysLeftLabel(i) : subtitle(i)}</span>
                 </span>
               </button>
             </li>
           ))}
           {visible.length === 0 && (
             <li className="empty muted">
-              {vault.items.length === 0 ? (
+              {inTrash && vault.trash.length === 0 ? (
+                "The Trash is empty"
+              ) : pool.length === 0 ? (
                 <>
                   Your vault is empty.
                   <br />

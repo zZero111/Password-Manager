@@ -44,6 +44,8 @@ export interface VaultItemData {
   passwordHistory: PasswordHistoryEntry[];
   createdAt: string;
   modifiedAt: string;
+  /** Set while the Item is in the Trash (encrypted with the rest; the Server never sees it). */
+  trashedAt?: string;
 }
 
 export interface VaultItem extends VaultItemData {
@@ -121,4 +123,22 @@ export function sortItems<T extends VaultItemData>(items: T[]): T[] {
 
 export function folders(items: VaultItemData[]): string[] {
   return [...new Set(items.map((i) => i.folder).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+}
+
+/** Days an Item stays in the Trash before any unlocked Device Purges it. */
+export const TRASH_DAYS = 30;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+export const isTrashed = (item: VaultItemData): boolean => Boolean(item.trashedAt);
+
+/** Whole days left before a Trash Item is Purged (0 once due). */
+export function trashDaysLeft(item: VaultItemData, now = new Date()): number {
+  if (!item.trashedAt) return TRASH_DAYS;
+  const left = TRASH_DAYS - (now.getTime() - Date.parse(item.trashedAt)) / DAY_MS;
+  return Math.max(0, Math.ceil(left));
+}
+
+/** True once an Item has been in the Trash for more than TRASH_DAYS. */
+export function trashExpired(item: VaultItemData, now = new Date()): boolean {
+  return Boolean(item.trashedAt) && now.getTime() - Date.parse(item.trashedAt!) > TRASH_DAYS * DAY_MS;
 }
