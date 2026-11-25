@@ -281,6 +281,74 @@ describe("sync", () => {
     expect(b.pendingCount).toBe(0);
   });
 
+  it("remote wins keeps local password", async () => {
+    const { session: a } = await registerAlice();
+    const b = await login();
+    const item = await a.save(login_("Email", "p1"));
+    await a.sync();
+    await b.sync();
+
+    // B changes the password offline; A edits notes later, so A wins.
+    await b.save({ ...item, login: { ...item.login!, password: "p2" } }, item.id);
+    await new Promise((r) => setTimeout(r, 5));
+    await a.save({ ...item, notes: "from A" }, item.id);
+    await a.sync();
+    const res = await b.sync();
+    expect(res.conflicts).toBeGreaterThan(0);
+    await a.sync();
+
+    for (const d of [a, b]) {
+      const got = await d.get(item.id);
+      expect(got?.notes).toBe("from A");
+      expect(got?.login?.password).toBe("p1");
+      expect(got?.secretHistory[0]).toMatchObject({ field: { kind: "password" }, value: "p2", fromConflict: true });
+    }
+    expect(a.pendingCount + b.pendingCount).toBe(0);
+  });
+
+  it("local wins keeps remote Authenticator key", async () => {
+    const { session: a } = await registerAlice();
+    const b = await login();
+    const item = await a.save(login_("Email"));
+    await a.sync();
+    await b.sync();
+
+    // A sets an Authenticator key offline; B edits notes later, so B wins.
+    await a.save({ ...item, login: { ...item.login!, totp: "JBSWY3DPEHPK3PXP" } }, item.id);
+    await new Promise((r) => setTimeout(r, 5));
+    await b.save({ ...item, notes: "from B" }, item.id);
+    await a.sync(); // A pushes first and is accepted
+    const res = await b.sync(); // B's change is newer: B wins, keeps A's key in history
+    expect(res.conflicts).toBeGreaterThan(0);
+    await a.sync();
+
+    for (const d of [a, b]) {
+      const got = await d.get(item.id);
+      expect(got?.notes).toBe("from B");
+      expect(got?.login?.totp).toBe("");
+      expect(got?.secretHistory[0]).toMatchObject({ field: { kind: "totp" }, value: "JBSWY3DPEHPK3PXP", fromConflict: true });
+    }
+    expect(a.pendingCount + b.pendingCount).toBe(0);
+  });
+
+  it("a Conflict where no secret changed adds no Secret history", async () => {
+    const { session: a } = await registerAlice();
+    const b = await login();
+    const item = await a.save(login_("Email"));
+    await a.sync();
+    await b.sync();
+
+    await a.save({ ...item, notes: "from A" }, item.id);
+    await new Promise((r) => setTimeout(r, 5));
+    await b.save({ ...item, notes: "from B" }, item.id);
+    await a.sync();
+    expect((await b.sync()).conflicts).toBeGreaterThan(0);
+    await a.sync();
+
+    for (const d of [a, b]) expect((await d.get(item.id))?.secretHistory).toEqual([]);
+    expect(a.pendingCount + b.pendingCount).toBe(0);
+  });
+
   it("imports many items in one go", async () => {
     const { session: a } = await registerAlice();
     await a.addMany(Array.from({ length: 120 }, (_, i) => login_(`Site ${i}`)));
