@@ -3,9 +3,11 @@ import {
   DeviceErasedError,
   DisconnectedError,
   NetworkError,
+  type OfflineEraseDays,
   type VaultItem,
   type VaultItemData,
   VaultSession,
+  offlineEraseAt,
 } from "@pm/core";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getSettings, updateSettings } from "./settings";
@@ -24,6 +26,9 @@ const SYNC_INTERVAL_MS = 60_000;
 /** How often a Locked Device asks the Server whether it is still accepted. */
 const CHECK_INTERVAL_MS = 3 * 60_000;
 
+/** Why this Device's vault was erased: Signed out from another Device, or Offline erase. */
+export type ErasedReason = "signedOut" | "offlineErase";
+
 export function useVault() {
   const [phase, setPhase] = useState<Phase>("loading");
   const [session, setSession] = useState<VaultSession | null>(null);
@@ -31,20 +36,25 @@ export function useVault() {
   const [trash, setTrash] = useState<VaultItem[]>([]);
   const [unreadable, setUnreadable] = useState(0);
   const [lockedEmail, setLockedEmail] = useState("");
-  /** Set when a Sign out from another Device erased this Device's vault. */
-  const [erasedNotice, setErasedNotice] = useState(false);
+  /** Set when this Device's vault was erased (Sign out elsewhere, or Offline erase). */
+  const [erasedNotice, setErasedNotice] = useState<ErasedReason | null>(null);
+  /** When Offline erase would erase this Device if it stays offline (from the stored vault; no key needed). */
+  const [offlineEraseDeadline, setOfflineEraseDeadline] = useState<Date | null>(null);
+  /** Bumped when a per-Device setting changes on the session, to re-render. */
+  const [, setDeviceSettingsTick] = useState(0);
   const [sync, setSync] = useState<SyncStatus>({ state: "idle", lastSyncAt: null, pending: 0 });
   const sessionRef = useRef<VaultSession | null>(null);
   sessionRef.current = session;
 
-  /** This Device was Signed out elsewhere and its vault is gone: drop everything in memory. */
-  const onErased = useCallback(() => {
+  /** This Device's vault is gone (Signed out elsewhere, or Offline erase): drop everything in memory. */
+  const onErased = useCallback((reason: ErasedReason = "signedOut") => {
     sessionRef.current?.lock();
     sessionRef.current = null;
     setSession(null);
     setItems([]);
     setTrash([]);
-    setErasedNotice(true);
+    setOfflineEraseDeadline(null);
+    setErasedNotice(reason);
     setPhase("signedOut");
   }, []);
 
@@ -52,7 +62,11 @@ export function useVault() {
   const checkDevice = useCallback(async () => {
     if (sessionRef.current) return; // unlocked: the session's own Server calls do this
     const outcome = await VaultSession.checkDevice(idbStorage).catch(() => "offline" as const);
-    if (outcome === "signedOut" && !sessionRef.current) onErased();
+    if (sessionRef.current) return;
+    if (outcome === "signedOut") return onErased("signedOut");
+    if (outcome === "offlineErased") return onErased("offlineErase");
+    const v = await idbStorage.load().catch(() => null);
+    setOfflineEraseDeadline(v ? offlineEraseAt(v) : null);
   }, [onErased]);
 
   // Initial state: is there a vault on this device? Then check device right away.
@@ -62,6 +76,7 @@ export function useVault() {
       .then((v) => {
         if (v) {
           setLockedEmail(v.email);
+          setOfflineEraseDeadline(offlineEraseAt(v));
           setPhase("locked");
           void checkDevice();
         } else setPhase("signedOut");
@@ -128,7 +143,7 @@ export function useVault() {
     async (s: VaultSession) => {
       setSession(s);
       sessionRef.current = s;
-      setErasedNotice(false);
+      setErasedNotice(null);
       setLockedEmail(s.email);
       setPhase("unlocked");
       await refresh(s);
@@ -155,6 +170,10 @@ export function useVault() {
     setItems([]);
     setTrash([]);
     setPhase((p) => (p === "unlocked" ? "locked" : p));
+    void idbStorage
+      .load()
+      .then((v) => setOfflineEraseDeadline(v ? offlineEraseAt(v) : null))
+      .catch(() => {});
   }, []);
 
   // Auto-lock after inactivity, and optionally when the app is hidden.
@@ -198,7 +217,13 @@ export function useVault() {
     sync,
     lockedEmail,
     erasedNotice,
-    dismissErasedNotice: () => setErasedNotice(false),
+    dismissErasedNotice: () => setErasedNotice(null),
+    offlineEraseDeadline,
+    /** Offline erase for this Device only (null = Off). Not synced. */
+    async setOfflineErase(days: OfflineEraseDays | null) {
+      await sessionRef.current!.setOfflineErase(days);
+      setDeviceSettingsTick((n) => n + 1);
+    },
     serverUrl: session?.serverUrl ?? "",
     session,
 

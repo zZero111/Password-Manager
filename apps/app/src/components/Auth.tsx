@@ -2,7 +2,7 @@ import { ApiError, NetworkError, WrongPasswordError, estimateStrength } from "@p
 import { type FormEvent, useState } from "react";
 import { guessDeviceName } from "../lib/platform";
 import { useSettings } from "../lib/settings";
-import type { Vault } from "../lib/useVault";
+import type { ErasedReason, Vault } from "../lib/useVault";
 import { ErrorText, Field, Icon, PasswordInput } from "./ui";
 
 function friendly(e: unknown): string {
@@ -138,6 +138,22 @@ export function Welcome({ vault }: { vault: Vault }) {
   );
 }
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** Shown on the Unlock screen when Offline erase will fire in less than a day. */
+function OfflineEraseWarning({ deadline }: { deadline: Date | null }) {
+  if (!deadline) return null;
+  const left = deadline.getTime() - Date.now();
+  if (left >= DAY_MS) return null;
+  const hours = Math.max(0, Math.ceil(left / 3_600_000));
+  return (
+    <p className="error" role="alert">
+      Offline erase will erase this Device’s vault {hours <= 1 ? "within the hour" : `in about ${hours} hours`} unless it
+      reaches the Server. Connect to the internet to keep it.
+    </p>
+  );
+}
+
 export function Unlock({ vault }: { vault: Vault }) {
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
@@ -163,6 +179,7 @@ export function Unlock({ vault }: { vault: Vault }) {
         <p className="muted center">
           Vault locked · <strong>{vault.lockedEmail}</strong>
         </p>
+        <OfflineEraseWarning deadline={vault.offlineEraseDeadline} />
         <Field label="Master password">
           <PasswordInput value={password} onChange={setPassword} autoFocus autoComplete="current-password" />
         </Field>
@@ -187,18 +204,25 @@ export function Unlock({ vault }: { vault: Vault }) {
 }
 
 /** Full-screen notice after a Sign out from another Device erased this Device's vault. */
-export function ErasedNotice({ vault }: { vault: Vault }) {
+export function ErasedNotice({ vault, reason }: { vault: Vault; reason: ErasedReason }) {
+  const text =
+    reason === "offlineErase"
+      ? {
+          title: "This Device’s vault was erased by Offline erase",
+          body: "It went longer than the chosen number of days without reaching the Server, so its copy of the vault and any unsynced changes were removed. Sign in again to use your vault here.",
+        }
+      : {
+          title: "This Device was signed out and its vault erased",
+          body: "It was signed out from another Device. Its copy of the vault has been removed. Sign in again to use your vault here.",
+        };
   return (
     <div className="auth" role="alertdialog" aria-labelledby="erased-title">
       <div className="auth-card">
         <Brand />
         <h2 id="erased-title" className="center">
-          This Device was signed out and its vault erased
+          {text.title}
         </h2>
-        <p className="muted center">
-          It was signed out from another Device. Its copy of the vault has been removed. Sign in again to use your vault
-          here.
-        </p>
+        <p className="muted center">{text.body}</p>
         <button type="button" className="btn primary wide" autoFocus onClick={vault.dismissErasedNotice}>
           Continue
         </button>
