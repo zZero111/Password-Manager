@@ -239,8 +239,6 @@ function ChangePassword({ vault }: { vault: Vault }) {
   );
 }
 
-const DELETE_CONFIRMATION = "DELETE";
-
 /** Account deletion: permanent, guarded by the Master password and a typed confirmation. */
 /** Move: re-home this Account onto another Server from this Device's encrypted copy. */
 function MoveServer({ vault }: { vault: Vault }) {
@@ -264,7 +262,7 @@ function MoveServer({ vault }: { vault: Vault }) {
           ? `Deleting your Account from the old Server was skipped: ${res.oldAccountError ?? "unknown error"}.`
           : "Your Account on the old Server was left as it was.";
       setDone(
-        `Moved ${res.uploaded} item${res.uploaded === 1 ? "" : "s"}. ${old} Your other Devices must sign in to ${res.serverUrl}.`,
+        `${res.resumed ? "Resumed the earlier, interrupted Move. " : ""}Moved ${res.uploaded} item${res.uploaded === 1 ? "" : "s"}. ${old} Your other Devices must sign in to ${res.serverUrl}.`,
       );
       setPassword("");
       setServerUrl("");
@@ -307,11 +305,13 @@ function DeleteAccount({ vault }: { vault: Vault }) {
   const [typed, setTyped] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const confirmed = typed.trim() === DELETE_CONFIRMATION;
+  // Typing the Account's own email is harder to do on autopilot than a fixed word.
+  const email = vault.lockedEmail;
+  const confirmed = !!email && typed.trim().toLowerCase() === email.toLowerCase();
 
   async function submit(e: FormEvent) {
     e.preventDefault();
-    if (!confirmed) return setError(`Type ${DELETE_CONFIRMATION} to confirm.`);
+    if (!confirmed) return setError("Type your Account's email to confirm.");
     setBusy(true);
     setError(null);
     try {
@@ -333,8 +333,8 @@ function DeleteAccount({ vault }: { vault: Vault }) {
         <Field label="Master password">
           <PasswordInput value={password} onChange={setPassword} autoComplete="current-password" />
         </Field>
-        <Field label={`Type ${DELETE_CONFIRMATION} to confirm`}>
-          <input value={typed} onChange={(e) => setTyped(e.target.value)} autoComplete="off" spellCheck={false} />
+        <Field label="Type your Account's email to confirm" hint={email}>
+          <input type="email" value={typed} onChange={(e) => setTyped(e.target.value)} autoComplete="off" spellCheck={false} />
         </Field>
         <ErrorText error={error} />
         <button className="btn danger" disabled={busy || !password || !confirmed}>

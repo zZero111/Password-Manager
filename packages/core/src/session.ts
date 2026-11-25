@@ -1,4 +1,4 @@
-import { ApiClient, type FetchFn, DisconnectedError, normalizeServerUrl } from "./api";
+import { ApiClient, ApiError, type FetchFn, DisconnectedError, normalizeServerUrl } from "./api";
 import {
   DEFAULT_KDF,
   DecryptionError,
@@ -145,6 +145,8 @@ export interface MoveResult {
   oldAccountDeleted: boolean;
   /** Why deleting the old Account was skipped, when it was asked for. */
   oldAccountError?: string;
+  /** True if an earlier, interrupted Move to the same Server was resumed. */
+  resumed: boolean;
 }
 const realClock: Clock = () => new Date();
 
@@ -239,8 +241,9 @@ export class VaultSession {
   /**
    * Ask the Server whether this Device is still accepted. Needs no Master
    * password, so it runs while Locked. A `signed_out` answer erases; so does
-   * Offline erase, but only when the Server can't be reached and its limit
-   * has passed — a reachable Server always just resets the countdown.
+   * Offline erase once its limit has passed and the Server can't be reached
+   * or no longer accepts this Device (Disconnected doesn't count as reaching
+   * it) — an accepting Server always just resets the countdown.
    */
   static async checkDevice(
     storage: VaultStorage,
@@ -250,7 +253,7 @@ export class VaultSession {
     const now = opts.now ?? realClock;
     const state = await storage.load();
     if (!state) return "noVault";
-    if (!state.token) return "disconnected";
+    if (!state.token) return (await VaultSession.offlineErase(storage, state, now)) ?? "disconnected";
     try {
       await new ApiClient(state.serverUrl, state.token, fetchFn).status();
     } catch (e) {
@@ -261,6 +264,7 @@ export class VaultSession {
         }
         // Re-read so a write made meanwhile (e.g. an edit) is not lost.
         const latest = (await storage.load()) ?? state;
+        if ((await VaultSession.offlineErase(storage, latest, now)) !== null) return "offlineErased";
         if (latest.token === state.token) await storage.save({ ...latest, token: null });
         return "disconnected";
       }
@@ -371,20 +375,48 @@ export class VaultSession {
 
     const deviceName = opts.deviceName ?? this.state.deviceName;
     const newApi = new ApiClient(serverUrl, null, this.fetchFn);
-    await newApi.register({ email, authKey, salt, kdf, protectedKey });
-    const res = await newApi.login({ email, authKey, deviceName });
+    let resumedLogin: Awaited<ReturnType<ApiClient["login"]>> | null = null;
+    try {
+      await newApi.register({ email, authKey, salt, kdf, protectedKey });
+    } catch (e) {
+      if (!(e instanceof ApiError && e.status === 409)) throw e;
+      // An earlier Move may have been interrupted. Resume only if this is
+      // provably the same Account with the same vault key; never someone else's.
+      resumedLogin = await this.ownAccountLogin(newApi, email, authKey, kek, deviceName);
+      if (!resumedLogin) throw e;
+    }
+    const resumed = resumedLogin !== null;
+    const res = resumedLogin ?? (await newApi.login({ email, authKey, deviceName }));
     newApi.token = res.token;
     const items: Record<string, ServerItem> = {};
+    if (resumed) {
+      // Upload only what the new Server is missing or has different.
+      const existing = await newApi.sync(0);
+      for (const si of existing.items) items[si.id] = si;
+      const todo: PushChange[] = [];
+      for (const c of changes) {
+        const si = items[c.id];
+        if (!si) todo.push(c);
+        else if (si.deleted || si.data !== c.data) todo.push({ ...c, baseRevision: si.revision });
+      }
+      changes.splice(0, changes.length, ...todo);
+    }
     for (let i = 0; i < changes.length; i += LIMITS.maxBatch) {
-      const batch = changes.slice(i, i + LIMITS.maxBatch);
-      const pushed = await newApi.push(batch);
-      if (pushed.conflicts.length > 0) throw new Error("The new Server already had Items for this Account");
-      const byId = new Map(batch.map((c) => [c.id, c]));
-      for (const { id, revision } of pushed.applied) {
-        const c = byId.get(id)!;
-        items[id] = { id, data: c.data, deleted: false, revision };
+      let batch = changes.slice(i, i + LIMITS.maxBatch);
+      for (let attempt = 0; batch.length > 0; attempt++) {
+        const pushed = await newApi.push(batch);
+        const byId = new Map(batch.map((c) => [c.id, c]));
+        for (const { id, revision } of pushed.applied) {
+          const c = byId.get(id)!;
+          items[id] = { id, data: c.data, deleted: false, revision };
+        }
+        if (pushed.conflicts.length === 0) break;
+        if (!resumed || attempt >= 3) throw new Error("The new Server already had Items for this Account");
+        // This Device is the source of the Move: its copy wins.
+        batch = pushed.conflicts.map((si) => ({ ...byId.get(si.id)!, baseRevision: si.revision }));
       }
     }
+    for (const [id, si] of Object.entries(items)) if (si.deleted) delete items[id];
 
     // Everything is on the new Server: switch this Device over.
     const oldApi = this.api;
@@ -407,7 +439,7 @@ export class VaultSession {
     this.cache.clear();
     await this.persist();
 
-    const result: MoveResult = { uploaded: Object.keys(items).length, oldAccountDeleted: false };
+    const result: MoveResult = { uploaded: Object.keys(items).length, oldAccountDeleted: false, resumed };
     if (opts.deleteOld) {
       try {
         await oldApi.deleteAccount({ authKey });
@@ -417,6 +449,35 @@ export class VaultSession {
       }
     }
     return result;
+  }
+
+  /**
+   * Signs `email` in on `api`'s Server; returns the login only if that worked
+   * with this Device's auth key and its protected vault key unwraps with this
+   * Device's kek, else null.
+   */
+  private async ownAccountLogin(
+    api: ApiClient,
+    email: string,
+    authKey: string,
+    kek: Parameters<typeof unwrapVaultKey>[0],
+    deviceName: string,
+  ) {
+    let res;
+    try {
+      res = await api.login({ email, authKey, deviceName });
+    } catch {
+      return null;
+    }
+    try {
+      await unwrapVaultKey(kek, res.protectedKey);
+      return res;
+    } catch {
+      api.token = res.token;
+      await api.logout().catch(() => {});
+      api.token = null;
+      return null;
+    }
   }
 
   /** Sign out on the server and erase this device's copy of the vault. */
@@ -507,6 +568,20 @@ export class VaultSession {
       }
       throw e;
     }
+  }
+
+  /**
+   * Offline erase for an unlocked session: call after the Server couldn't be
+   * reached or no longer accepts this Device. Past the limit, erases this
+   * Device's vault and locks; returns whether it did. Accepted contact keeps
+   * `lastReachedServer` current, so a reachable Device is never past it.
+   */
+  async offlineEraseIfDue(): Promise<boolean> {
+    if (this.erasedFlag) return true;
+    const at = offlineEraseAt(this.state);
+    if (!at || this.now().getTime() <= at.getTime()) return false;
+    await this.erase();
+    return true;
   }
 
   private async erase(): Promise<void> {
