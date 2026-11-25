@@ -13,7 +13,7 @@ import {
   unwrapVaultKey,
 } from "./crypto";
 import type { PushChange, ServerItem } from "./protocol";
-import { type VaultItem, type VaultItemData, applyEdit, isTrashed, newId, normalizeItem, trashExpired } from "./vault";
+import { type VaultItem, type VaultItemData, applyEdit, isTrashed, newId, normalizeItem, settleConflict, trashExpired } from "./vault";
 
 /** Everything persisted on a device. Contains no plaintext secrets. */
 export interface LocalVault {
@@ -433,14 +433,23 @@ export class VaultSession {
       return false;
     }
     let remoteWins: boolean;
+    let merged: VaultItemData | undefined;
     try {
       const [l, r] = await Promise.all([this.decrypt(si.id, local.data), this.decrypt(si.id, si.data)]);
       remoteWins = changeTime(r) >= changeTime(l);
+      // Neither side Purged: the loser's secrets survive in the winner's Secret history.
+      if (!("tombstone" in l) && !("tombstone" in r)) {
+        merged = remoteWins ? settleConflict(r, l, this.now()) : settleConflict(l, r, this.now());
+      }
     } catch {
       // Can't read one side; keep whichever we can read (prefer local edit).
       remoteWins = false;
     }
-    if (remoteWins) delete this.state.pending[si.id];
+    if (merged) {
+      const winner = remoteWins ? si : local;
+      const data = await encryptJson(this.key(), merged, itemAad(si.id));
+      this.state.pending[si.id] = { id: si.id, data, deleted: winner.deleted, baseRevision: si.revision };
+    } else if (remoteWins) delete this.state.pending[si.id];
     else local.baseRevision = si.revision;
     return true;
   }

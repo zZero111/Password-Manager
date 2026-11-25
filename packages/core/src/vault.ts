@@ -154,6 +154,22 @@ export function pushSecretHistory(history: SecretHistoryEntry[], entries: Secret
 }
 
 /**
+ * Settle a Conflict: the winner keeps the whole Item, and any of the loser's
+ * secret values the winner no longer holds are added to the winner's Secret
+ * history (marked fromConflict). Values already in that history are not
+ * repeated. Returns undefined when nothing was lost. modifiedAt is kept as the
+ * winner's, so recording history never makes the Item look like a newer edit.
+ */
+export function settleConflict(winner: VaultItemData, loser: VaultItemData, now = new Date()): VaultItemData | undefined {
+  const known = new Set(winner.secretHistory.map((h) => `${JSON.stringify(h.field)}|${h.value}`));
+  const lost = lostSecrets(loser, winner, now.toISOString())
+    .filter((e) => !known.has(`${JSON.stringify(e.field)}|${e.value}`))
+    .map((e) => ({ ...e, fromConflict: true }));
+  if (lost.length === 0) return undefined;
+  return { ...winner, secretHistory: pushSecretHistory(winner.secretHistory, lost) };
+}
+
+/**
  * Apply an edit: bump modifiedAt and record every changed secret value in
  * Secret history.
  */
